@@ -1,0 +1,5 @@
+.env
+.hardstyle-sync-cache.json
+/hardstyle-playlist-sync
+dist/
+.DS_Store
