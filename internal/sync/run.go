@@ -208,7 +208,7 @@ func (s Schedule) Next(res Result, err error, failures int, sinceFull time.Durat
 		if s.Every > 0 && sinceFull+s.Watch >= s.Every {
 			return max(s.Every-sinceFull, 0), i18n.T("geplanter Lauf", "scheduled run"), false
 		}
-		return s.Watch, i18n.T("Prüfung auf neue Tracks", "check for new tracks"), true
+		return s.Watch, i18n.T("neue Tracks", "new tracks"), true
 	}
 	return s.Every, i18n.T("geplanter Lauf", "scheduled run"), false
 }

@@ -1,4 +1,4 @@
-// Command hardstyle-playlist-sync reads the latest releases from hardstyle.com and keeps a Spotify playlist up
+// Command harderstyles-radar reads the latest releases from hardstyle.com and keeps a Spotify playlist up
 // to date (max N tracks, oldest are removed first).
 package main
 

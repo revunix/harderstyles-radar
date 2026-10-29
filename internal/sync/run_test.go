@@ -124,7 +124,7 @@ func TestDescriptionCanBeSwitchedOffAndFailsSoftly(t *testing.T) {
 func TestScheduleWithTheService(t *testing.T) {
 	s := Schedule{Watch: 15 * time.Minute, Continue: 10 * time.Minute, Every: 24 * time.Hour}
 	wait, why, quick := s.Next(Result{}, nil, 0, time.Hour)
-	if wait != 15*time.Minute || !quick || why != "Prüfung auf neue Tracks" {
+	if wait != 15*time.Minute || !quick || why != "neue Tracks" {
 		t.Errorf("after a run: %s %q quick=%v, want a check in 15 minutes", wait, why, quick)
 	}
 	// The daily full run is due soon: it comes instead of the check.

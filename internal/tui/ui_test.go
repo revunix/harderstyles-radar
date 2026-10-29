@@ -80,7 +80,7 @@ func TestTooSmall(t *testing.T) {
 func TestViewShowsTheRun(t *testing.T) {
 	m := demoModel(120, 36, 30)
 	view := ansi.Strip(m.View())
-	for _, want := range []string{"hardstyle-sync", "Releases › Suchen", "Suche bei Spotify", "20 / 30", "Track Nummer 1", "● neu", "✓ drin", "✗ fehlt", "Playlist", "312", "/ 500", "12.01.2026", "Protokoll", "x abbrechen", "DATUM", "29.10.2026", "Anfragen"} {
+	for _, want := range []string{"harderstyles-radar", "Releases › Suchen", "Suche bei Spotify", "20 / 30", "Track Nummer 1", "● neu", "✓ drin", "✗ fehlt", "Playlist", "312", "/ 500", "12.01.2026", "Protokoll", "x abbrechen", "DATUM", "29.10.2026", "Anfragen"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("view lacks %q", want)
 		}
@@ -294,7 +294,7 @@ func TestEnglishInterface(t *testing.T) {
 	view := ansi.Strip(m.View())
 	for _, want := range []string{"Releases › Searching", "Searching Spotify", "20 / 30", "DATE", "TITLE", "ARTIST", "STATUS", "29 Oct 2026",
 		"● new", "✓ in list", "✗ missing", "Oldest", "12 Jan 2026", "Newest", "Requests", "Last run", "Next run", "Mode", "writes",
-		"Log", "Date", "on hardstyle.com", "↑/↓ select", "x cancel", "? Help", "q quit"} {
+		"Log", "Date", "hardstyle.com", "↑/↓ select", "x cancel", "? Help", "q quit"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("English screen lacks %q:\n%s", want, view)
 		}

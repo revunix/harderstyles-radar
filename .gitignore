@@ -1,5 +1,7 @@
 .env
 .hardstyle-sync-cache.json
-/hardstyle-playlist-sync
+/harderstyles-radar
 dist/
+docs/screenshots/*.ans
+tools/ansi2png/ansi2png
 .DS_Store

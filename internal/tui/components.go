@@ -102,7 +102,7 @@ func renderMeter(width, percent int) string {
 // path to the current view; on the right the context and the clock.
 func renderHeader(width int, mark string, steps []string, status, context, clock string) []string {
 	sep := theme.Divider.Render("  │  ")
-	head := mark + " " + gradientText("hardstyle") + theme.Muted.Render("-sync")
+	head := mark + " " + gradientText("harderstyles") + theme.Muted.Render("-radar")
 	if len(steps) > 0 {
 		parts := make([]string, len(steps))
 		for i, s := range steps {

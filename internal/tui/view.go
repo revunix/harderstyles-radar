@@ -68,7 +68,7 @@ func (m *model) View() string {
 	list, detail, logBox, info := m.layout()
 	switch {
 	case m.help:
-		rows = append(rows, renderBox(m.width, m.height-len(rows)-len(m.footer()), i18n.T("Hilfe", "Help"), theme.BoxActive, m.helpLines())...)
+		rows = append(rows, renderBox(m.width, m.height-len(rows)-len(m.footer()), i18n.T("Hilfe", "Help"), theme.BoxActive, m.helpLines(m.width-4))...)
 	case m.logView && detail.w == 0:
 		rows = append(rows, renderBox(list.w, list.h, i18n.T("Protokoll", "Log"), theme.BoxActive, m.logLines(list.w-4, list.h-2))...)
 	case m.logView:
@@ -221,7 +221,8 @@ func (m *model) columns(inner int) columns {
 		c.genre = 11
 	}
 	if inner >= 60 {
-		c.date = 10
+		// The date column follows the language: "29 Oct 2026" is one cell wider than "29.10.2026".
+		c.date = utf8.RuneCountInString(i18n.Date(time.Date(2026, 12, 29, 0, 0, 0, 0, time.UTC)))
 	}
 	free := inner - rowIndent - statusWidth - c.idx - 1 - 2 // gaps between the columns
 	if c.genre > 0 {
@@ -271,8 +272,8 @@ func (m *model) detailBox(r rect) []string {
 	content := []string{
 		detailRow(i18n.T("Titel", "Title"), displayTitle(it.track)),
 		detailRow(i18n.T("Künstler", "Artist"), it.track.Artist),
-		detailRow(i18n.T("Datum", "Date"), shortDate(it.date)+theme.Muted.Render(i18n.T(" auf hardstyle.com", " on hardstyle.com"))),
-		detailRow("event.Status", statusBadge(it.status)),
+		detailRow(i18n.T("Datum", "Date"), shortDate(it.date)+" "+theme.Muted.Render("hardstyle.com")),
+		detailRow("Status", statusBadge(it.status)),
 	}
 	if it.track.Genre != "" {
 		content = append(content[:2], append([]string{detailRow("Genre", it.track.Genre)}, content[2:]...)...)
@@ -347,13 +348,12 @@ func (m *model) infoBox(r rect) []string {
 		renderMeter(inner, percent),
 		detailRow(i18n.T("Ältestes", "Oldest"), oldest),
 		detailRow(i18n.T("Neuestes", "Newest"), newest),
-		detailRow(i18n.T("Anfragen", "Requests"), fmt.Sprintf("%d", m.requests)+theme.Muted.Render(fmt.Sprintf(i18n.T(" · alle %s · max. %d Suchen", " · every %s · max. %d searches"), m.opts.RequestDelay.Round(10*time.Millisecond), m.opts.MaxSearches))),
+		detailRow(i18n.T("Anfragen", "Requests"), fmt.Sprintf("%d", m.requests)+theme.Muted.Render(fmt.Sprintf(i18n.T(" · alle %s", " · every %s"), m.opts.RequestDelay.Round(10*time.Millisecond)))),
 		detailRow(i18n.T("Letzter Lauf", "Last run"), last),
 		detailRow("Spotify-Apps", m.appsText()),
 		detailRow(i18n.T("Nächster Lauf", "Next run"), m.countdown()+m.nextWhyText()),
 		detailRow(i18n.T("Modus", "Mode"), mode),
 		detailRow(i18n.T("Umfang", "Scope"), genres),
-		detailRow("Version", "v"+Version),
 	}
 	return renderBox(r.w, r.h, "Playlist", theme.BoxQuiet, content)
 }
@@ -382,9 +382,9 @@ func (m *model) appsText() string {
 			theme.Muted.Render(fmt.Sprintf(i18n.T(" · bis %s", " · until %s"), i18n.Stamp(earliest)))
 	case free < len(apps):
 		return fmt.Sprintf(i18n.T("#%d aktiv", "#%d in use"), inUse) +
-			theme.Muted.Render(fmt.Sprintf(i18n.T(" · %d von %d gesperrt, frei ab %s", " · %d of %d blocked, free from %s"), len(apps)-free, len(apps), i18n.Stamp(earliest)))
+			theme.Muted.Render(fmt.Sprintf(i18n.T(" · %d/%d gesperrt", " · %d/%d blocked"), len(apps)-free, len(apps)))
 	default:
-		return fmt.Sprintf(i18n.T("#%d aktiv", "#%d in use"), inUse) + theme.Muted.Render(fmt.Sprintf(i18n.T(" · %d hinterlegt, keine Sperre", " · %d configured, no block"), len(apps)))
+		return fmt.Sprintf(i18n.T("#%d aktiv", "#%d in use"), inUse) + theme.Muted.Render(fmt.Sprintf(i18n.T(" · %d hinterlegt", " · %d configured"), len(apps)))
 	}
 }
 
@@ -409,7 +409,7 @@ func (m *model) logLines(width, height int) []string {
 	return lines
 }
 
-func (m *model) helpLines() []string {
+func (m *model) helpLines(width int) []string {
 	keys := [][2]string{
 		{"↑/↓  j/k", i18n.T("Release wählen", "Select release")},
 		{"PgUp/PgDn", i18n.T("seitenweise blättern", "scroll by page")},
@@ -426,13 +426,18 @@ func (m *model) helpLines() []string {
 	for _, k := range keys {
 		lines = append(lines, theme.AccentBold.Render(padTo(k[0], 12))+" "+theme.Text.Render(k[1]))
 	}
-	lines = append(lines, "",
-		theme.Muted.Render(fmt.Sprintf(i18n.T("Die Playlist hat dieselbe Reihenfolge wie hardstyle.com (neueste zuerst) und höchstens %d Tracks, die ältesten am Ende fallen weg.",
-			"The playlist has the same order as hardstyle.com (newest first) and at most %d tracks, the oldest at the end drop out."), m.opts.MaxTracks)),
-		theme.Muted.Render(fmt.Sprintf(i18n.T("Spotify wird nur langsam gefragt: höchstens %d Suchen pro Lauf. Bleibt etwas übrig, geht das Tool nach %s von selbst weiter, ebenso nach einem Fehler oder einer Spotify-Sperre.",
-			"Spotify is asked slowly: at most %d searches per run. If something is left over, the tool carries on by itself after %s, as it does after an error or a Spotify block."), m.opts.MaxSearches, i18n.Duration(m.opts.ContinueDelay))))
+	paragraph := func(text string) {
+		for _, line := range strings.Split(ansi.Wrap(text, max(20, width), ""), "\n") {
+			lines = append(lines, theme.Muted.Render(line))
+		}
+	}
+	lines = append(lines, "")
+	paragraph(fmt.Sprintf(i18n.T("Die Playlist hat dieselbe Reihenfolge wie hardstyle.com (neueste zuerst) und höchstens %d Tracks, die ältesten am Ende fallen weg.",
+		"The playlist has the same order as hardstyle.com (newest first) and at most %d tracks, the oldest at the end drop out."), m.opts.MaxTracks))
+	paragraph(fmt.Sprintf(i18n.T("Spotify wird nur langsam gefragt: höchstens %d Suchen pro Lauf. Bleibt etwas übrig, geht das Tool nach %s von selbst weiter, ebenso nach einem Fehler oder einer Spotify-Sperre.",
+		"Spotify is asked slowly: at most %d searches per run. If something is left over, the tool carries on by itself after %s, as it does after an error or a Spotify block."), m.opts.MaxSearches, i18n.Duration(m.opts.ContinueDelay)))
 	if m.opts.Every > 0 {
-		lines = append(lines, theme.Muted.Render(i18n.T("Neuer Lauf ", "New run ")+everyText(m.opts.Every)+"."))
+		paragraph(i18n.T("Neuer Lauf ", "New run ") + everyText(m.opts.Every) + ".")
 	}
 	return lines
 }
