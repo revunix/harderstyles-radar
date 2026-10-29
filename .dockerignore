@@ -1,0 +1,10 @@
+.git
+.github
+dist
+docs
+tools
+*.md
+.env
+.hardstyle-sync-cache.json
+/harderstyles-radar
+.DS_Store

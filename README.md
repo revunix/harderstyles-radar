@@ -336,6 +336,47 @@ sha256sum -c checksums.txt
 The binary has no dependencies of its own; the cache is a single JSON file next to it (or wherever `CACHE_FILE`
 points).
 
+## Docker
+
+```sh
+docker build -t harderstyles-radar .
+```
+
+One sync now, with `.env` and the cache in the current directory:
+
+```sh
+docker run --rm -v "$PWD:/data" harderstyles-radar -no-tui
+```
+
+Service mode: check every 15 minutes, a full sync once a day, and restart with the machine:
+
+```sh
+docker run -d --name harderstyles-radar --restart unless-stopped \
+  -v "$PWD:/data" \
+  harderstyles-radar -no-tui -watch 15m -every 24h
+```
+
+The interface, which needs a terminal:
+
+```sh
+docker run --rm -it -v "$PWD:/data" harderstyles-radar
+```
+
+`/data` is the working directory inside the image: the `.env` is read from there and the cache is written to
+`/data/hardstyle-sync-cache.json`. Instead of a `.env`, pass the variables with `-e`:
+
+```sh
+docker run --rm \
+  -e SPOTIFY_CLIENT_ID=... \
+  -e SPOTIFY_CLIENT_SECRET=... \
+  -e SPOTIFY_REFRESH_TOKEN=... \
+  -e SPOTIFY_PLAYLIST_ID=... \
+  -v harderstyles-data:/data \
+  harderstyles-radar -no-tui
+```
+
+With `--user "$(id -u):$(id -g)"` the cache file belongs to your user instead of root.
+
 ## Layout
 
 ```
