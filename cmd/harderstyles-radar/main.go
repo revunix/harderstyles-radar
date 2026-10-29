@@ -24,7 +24,7 @@ import (
 )
 
 // version is set through -ldflags.
-var version = "0.1.0"
+var version = "1.0.0"
 
 func main() {
 	auth := flag.Bool("auth", false, "log in to Spotify once and print the refresh token")

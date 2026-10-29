@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -25,6 +26,8 @@ type Config struct {
 	MaxSearches, DateTolerance, AlbumMinTracks int
 	RequestDelay, ContinueDelay, WatchInterval time.Duration
 	Description                                string
+	// DiscordWebhook sends the summary of a run to Discord; empty switches it off.
+	DiscordWebhook string
 }
 
 // allGenres are the genre filters offered by hardstyle.com/en/music.
@@ -51,7 +54,8 @@ func Load(needRefresh bool) (Config, error) {
 		WatchInterval: envDuration("WATCH_INTERVAL", 0),
 		RequestDelay:  envDuration("REQUEST_DELAY", 800*time.Millisecond),
 		// After a run that stopped at the search limit (or failed) the next one follows after this pause.
-		ContinueDelay: envDuration("CONTINUE_DELAY", 10*time.Minute),
+		ContinueDelay:  envDuration("CONTINUE_DELAY", 10*time.Minute),
+		DiscordWebhook: strings.TrimSpace(os.Getenv("DISCORD_WEBHOOK_URL")),
 	}
 	for _, g := range strings.Split(envStr("GENRES", "Hardstyle"), ",") {
 		switch g = strings.TrimSpace(g); {
@@ -108,6 +112,13 @@ func Load(needRefresh bool) (Config, error) {
 	}
 	if c.MaxTracks < 1 || c.Pages < 1 {
 		return c, errors.New(i18n.T("MAX_TRACKS und PAGES müssen mindestens 1 sein", "MAX_TRACKS and PAGES must be at least 1"))
+	}
+	if c.DiscordWebhook != "" {
+		u, err := url.Parse(c.DiscordWebhook)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			// The address carries the token of the webhook, so it is not repeated here.
+			return c, errors.New(i18n.T("DISCORD_WEBHOOK_URL ist keine gültige http(s)-Adresse", "DISCORD_WEBHOOK_URL is not a valid http(s) URL"))
+		}
 	}
 	return c, nil
 }

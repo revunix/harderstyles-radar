@@ -9,6 +9,7 @@ import (
 	"hardstylesync/internal/event"
 	"hardstylesync/internal/hardstyle"
 	"hardstylesync/internal/i18n"
+	"hardstylesync/internal/notify"
 	"hardstylesync/internal/spotify"
 	"log"
 	"net/http"
@@ -16,12 +17,54 @@ import (
 	"time"
 )
 
-// Run does one run: read the releases from hardstyle.com and bring the playlist up to date.
+// Run does one run and sends its summary to the Discord webhook when one is set.
+func Run(ctx context.Context, hc *http.Client, sp *spotify.Client, cfg config.Config, dryRun, quick bool, emit event.Emit) (Result, error) {
+	res, err := run(ctx, hc, sp, cfg, dryRun, quick, emit)
+	notifyRun(ctx, hc, cfg, res, err, dryRun, quick, sp, emit)
+	return res, err
+}
+
+// notifyRun sends the summary to Discord. A check for new tracks that found nothing stays quiet, a full run always
+// reports, a failed run reports its error. A failed message is only logged: the run itself was fine.
+func notifyRun(ctx context.Context, hc *http.Client, cfg config.Config, res Result, err error, dryRun, quick bool, sp *spotify.Client, emit event.Emit) {
+	if cfg.DiscordWebhook == "" || dryRun {
+		return
+	}
+	now := time.Now()
+	var nerr error
+	switch {
+	case err != nil:
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+		nerr = notify.SendFailure(ctx, hc, cfg.DiscordWebhook, now, err)
+	case quick && res.Added == 0 && res.Removed == 0:
+		return
+	default:
+		nerr = notify.SendRun(ctx, hc, cfg.DiscordWebhook, notify.RunSummary{
+			PlaylistID: cfg.PlaylistID,
+			At:         now,
+			After:      res.After,
+			Added:      res.Added,
+			Removed:    res.Removed,
+			Matched:    res.Matched,
+			Missing:    len(res.Unmatched),
+			Deferred:   res.Deferred,
+			Requests:   sp.Requests(),
+			NewTracks:  res.AddedTracks,
+		})
+	}
+	if nerr != nil {
+		emit.Logf(i18n.T("Discord-Nachricht nicht gesendet: %v", "Discord message not sent: %v"), nerr)
+	}
+}
+
+// run does one run: read the releases from hardstyle.com and bring the playlist up to date.
 //
 // A quick run is the check for new tracks that a service makes every few minutes: it reads the list only as far
 // as the first page that has a release it knows, and does nothing, not even one Spotify request, when there is
 // nothing new. A full run reads all pages of the setting.
-func Run(ctx context.Context, hc *http.Client, sp *spotify.Client, cfg config.Config, dryRun, quick bool, emit event.Emit) (Result, error) {
+func run(ctx context.Context, hc *http.Client, sp *spotify.Client, cfg config.Config, dryRun, quick bool, emit event.Emit) (Result, error) {
 	c, err := cache.Load(cfg.CacheFile)
 	if err != nil {
 		emit.Logf(i18n.T("Zwischenspeicher nicht lesbar: %v", "Cache not readable: %v"), err)

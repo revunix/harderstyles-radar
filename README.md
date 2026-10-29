@@ -27,6 +27,8 @@ minutes and touches Spotify only when something new appeared.
   rate-limits the app.
 - **Fallback apps** — a second and third Spotify app take over when the first one is blocked.
 - **Dry run** — shows what would change without writing anything.
+- **Discord summary** — every full run, and every check that found new tracks, reports to a Discord webhook: what
+  changed, which tracks came in, and what is missing. A failed run reports its error.
 - **English and German** — the UI, the log and the messages follow `UI_LANGUAGE` or `-lang`.
 - **Keeps going by itself** — leftover releases, errors and blocks are picked up again after a pause, with a
   countdown in the UI.
@@ -133,6 +135,7 @@ precedence over the file. `.env` is listed in `.gitignore`.
 | `UI_LANGUAGE` | no | `de` | Language of the UI, the log and the messages: `de` or `en` (also `-lang en`) |
 | `CONTINUE_DELAY` | no | `10m` | Pause before the next run when releases are still waiting or a run failed |
 | `PLAYLIST_DESCRIPTION` | no | English default text | Playlist description; `{date}`, `{max}` and `{source}` are replaced, `off` leaves the description alone |
+| `DISCORD_WEBHOOK_URL` | no | | Send the summary of a run to this Discord webhook (channel → Edit Channel → Integrations → Webhooks). Empty: nothing is sent |
 | `DATE_TOLERANCE_DAYS` | no | `14` | Allowed difference between the Spotify date and the date on hardstyle.com; a few days are normal (see below) |
 
 ## Usage
@@ -248,6 +251,30 @@ and the date of the last update, for example:
 The text contains the date, so it changes at most once a day, and only then does the tool write it (one request).
 Use `PLAYLIST_DESCRIPTION` for your own text; Spotify accepts at most 300 characters. If setting it fails, this is
 logged, and the run still counts as successful.
+
+## Discord summary
+
+With `DISCORD_WEBHOOK_URL` set, the tool posts a short summary to that Discord channel: what the run changed, which
+tracks came into the playlist, and the counts of the run. A webhook is made in the channel settings under
+**Integrations → Webhooks → New Webhook → Copy Webhook URL**; paste that address into `.env`:
+
+```sh
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/123456789/abcdef...
+```
+
+When a message is sent:
+
+- **Full run** — always, also when nothing changed (“Nichts Neues”, with the size of the playlist). This makes the
+  optional daily run a small heartbeat.
+- **Check for new tracks** (`WATCH_INTERVAL`) — only when tracks were added or removed, so a quiet service does not
+  post every 15 minutes.
+- **Failed run** — a short message with the error. A cancelled run and a dry run stay quiet.
+
+The message is an embed: the new tracks (up to 10, the rest counted), the counts as fields (new, removed, found on
+Spotify, missing, waiting, Spotify requests), a link to the playlist and the time of the run. The texts follow
+`UI_LANGUAGE`, so a German UI posts German messages. The webhook address is a secret — anyone with it can post to
+that channel — hence it belongs in `.env` and is kept out of the log, even when Discord cannot be reached. A message
+that cannot be sent is logged; the run itself still counts as successful.
 
 ## The tool keeps going on its own
 
@@ -387,6 +414,7 @@ internal/hardstyle/       Reading hardstyle.com (list, detail page, ISRC)
 internal/match/           Comparing title, artist and date
 internal/spotify/         Spotify API, login, searching for a release
 internal/cache/           Cache (matches, dates, playlist, block)
+internal/notify/          Summary of a run for a Discord webhook
 internal/event/           Events of a run for the UI
 internal/sync/            One run: read, search, write playlist, schedule
 internal/tui/             UI (bubbletea/lipgloss)

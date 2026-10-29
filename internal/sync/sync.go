@@ -43,6 +43,8 @@ type Result struct {
 	Before    int  // tracks in the playlist before the run
 	After     int  // tracks in the playlist after the run
 	Unmatched []hardstyle.Track
+	// AddedTracks are the releases that got tracks into the playlist in this run, in the order of the site.
+	AddedTracks []hardstyle.Track
 }
 
 // resolved is what a run knows about one release.
@@ -198,6 +200,7 @@ func Sync(ctx context.Context, sp *spotify.Client, playlistID string, releases [
 	c.SetPlaylist(cache.PlaylistSnapshot{ID: playlistID, SnapshotID: snap, URIs: final, At: time.Now()})
 	for i, r := range known {
 		if slices.ContainsFunc(r.uris, func(u string) bool { return !inPlaylist[u] && finalSet[u] }) {
+			res.AddedTracks = append(res.AddedTracks, releases[i])
 			emit.Send(event.Event{Kind: event.EvItem, Index: i, Status: event.StatusAdded, URI: r.primary(), Date: r.date, Note: r.note()})
 		}
 	}

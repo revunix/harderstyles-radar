@@ -41,6 +41,30 @@ func TestGeneralListSetting(t *testing.T) {
 	}
 }
 
+func TestDiscordWebhook(t *testing.T) {
+	t.Setenv("SPOTIFY_CLIENT_ID", "x")
+	t.Setenv("SPOTIFY_CLIENT_SECRET", "x")
+	t.Setenv("DISCORD_WEBHOOK_URL", " https://discord.com/api/webhooks/1/token ")
+	cfg, err := Load(false)
+	if err != nil || cfg.DiscordWebhook != "https://discord.com/api/webhooks/1/token" {
+		t.Fatalf("webhook = %q, err = %v", cfg.DiscordWebhook, err)
+	}
+
+	t.Setenv("DISCORD_WEBHOOK_URL", "discord.com/api/webhooks/1/token")
+	if _, err := Load(false); err == nil || !strings.Contains(err.Error(), "DISCORD_WEBHOOK_URL") {
+		t.Errorf("a URL without a scheme must be reported, err = %v", err)
+	}
+	// The error must not repeat the address, it contains the token.
+	if _, err := Load(false); err != nil && strings.Contains(err.Error(), "token") {
+		t.Errorf("the error repeats the webhook address: %v", err)
+	}
+
+	t.Setenv("DISCORD_WEBHOOK_URL", "")
+	if cfg, err := Load(false); err != nil || cfg.DiscordWebhook != "" {
+		t.Errorf("without a webhook: %q, %v", cfg.DiscordWebhook, err)
+	}
+}
+
 func TestLoadDotEnv(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".env")
 	content := "# comment\nDOT_A=one\nexport DOT_B=\"two words\"\nDOT_C='x' \nDOT_D=val # note\nDOT_KEEP=fromfile\nDOT_E=   # only a comment\n\nbroken line\n"
