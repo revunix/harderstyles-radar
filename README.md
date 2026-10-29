@@ -326,6 +326,13 @@ Below 100 columns the list fills the whole height; the log stays available with 
 go build -o harderstyles-radar ./cmd/harderstyles-radar
 ```
 
+Prebuilt archives for Linux, macOS and Windows (amd64 and arm64) are on the
+[releases](https://github.com/revunix/harderstyles-radar/releases) page, each with a `checksums.txt` to verify:
+
+```sh
+sha256sum -c checksums.txt
+```
+
 The binary has no dependencies of its own; the cache is a single JSON file next to it (or wherever `CACHE_FILE`
 points).
 
