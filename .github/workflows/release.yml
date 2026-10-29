@@ -1,0 +1,168 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.2.3)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -count=1
+
+  build:
+    needs: test
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build binary
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          ext=""
+          if [ "$GOOS" = "windows" ]; then
+            ext=".exe"
+          fi
+          # The interface writes the version as "v" + Version, so the tag loses its "v" here.
+          version="${TAG#v}"
+          go build -trimpath -ldflags "-s -w -X main.version=${version}" -o "dist/harderstyles-radar${ext}" ./cmd/harderstyles-radar
+
+      - name: Package archive
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          safe_tag="${TAG//\//-}"
+          archive="harderstyles-radar_${safe_tag}_${GOOS}_${GOARCH}"
+          if [ "$GOOS" = "windows" ]; then
+            (cd dist && zip -q "${archive}.zip" harderstyles-radar.exe)
+            rm -f dist/harderstyles-radar.exe
+          else
+            tar -czf "dist/${archive}.tar.gz" -C dist harderstyles-radar
+            rm -f dist/harderstyles-radar
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: 'dist-*'
+          merge-multiple: true
+          path: dist
+
+      - name: Generate changelog
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "Tag ${TAG} does not exist; create and push it first." >&2
+            exit 1
+          fi
+          previous="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"
+          if [ -n "$previous" ]; then
+            range="${previous}..${TAG}"
+            compare="https://github.com/${GITHUB_REPOSITORY}/compare/${previous}...${TAG}"
+          else
+            range="${TAG}"
+            compare=""
+          fi
+          {
+            echo "# Changes in ${TAG}"
+            echo
+            echo "_$(date -u +%Y-%m-%d)_"
+            echo
+            git log "${range}" --no-merges --pretty=format:'- %s (`%h`)'
+            if [ -n "$compare" ]; then
+              echo
+              echo
+              echo "**Full diff:** ${compare}"
+            fi
+          } > dist/CHANGELOG.md
+
+      - name: Create checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          for file in *; do
+            [ "$file" = "checksums.txt" ] && continue
+            sha256sum "$file"
+          done > checksums.txt
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+            # Deleting and re-pushing a tag turns its release back into a draft;
+            # this publishes it again.
+            gh release edit "$TAG" --notes-file dist/CHANGELOG.md --draft=false --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" \
+              --notes-file dist/CHANGELOG.md
+          fi
