@@ -128,11 +128,13 @@ precedence over the file. `.env` is listed in `.gitignore`.
 | `PAGES` | no | `2`; with `GENRES=any` enough for `MAX_TRACKS` (17) | Pages per genre, 30 tracks per page |
 | `MAX_TRACKS` | no | `500` | Playlist limit |
 | `CACHE_FILE` | no | `.hardstyle-sync-cache.json` | Cache: matches, dates, missing tracks, playlist, block |
+| `CORRECTIONS_FILE` | no | `corrections.txt` next to the cache | Releases whose Spotify track was refused (see below) |
 | `MAX_SEARCHES` | no | `100` | At most this many Spotify searches per run |
 | `REQUEST_DELAY` | no | `800ms` | Pause between two Spotify requests |
 | `WATCH_INTERVAL` | no | `0` (off) | Service mode: check hardstyle.com for new tracks this often, e.g. `15m` (also `-watch 15m`) |
 | `ALBUM_MIN_TRACKS` | no | `2` | From this many tracks sharing the same catalog number, the release counts as an album and all its tracks come from the same Spotify album; `0` turns it off |
 | `UI_LANGUAGE` | no | `de` | Language of the UI, the log and the messages: `de` or `en` (also `-lang en`) |
+| `NO_COLOR` | no | | Set to anything (or `TERM=dumb`) and the interface draws as plain text, without color. The layout stays the same |
 | `CONTINUE_DELAY` | no | `10m` | Pause before the next run when releases are still waiting or a run failed |
 | `PLAYLIST_DESCRIPTION` | no | English default text | Playlist description; `{date}`, `{max}` and `{source}` are replaced, `off` leaves the description alone |
 | `DISCORD_WEBHOOK_URL` | no | | Send the summary of a run to this Discord webhook (channel → Edit Channel → Integrations → Webhooks). Empty: nothing is sent |
@@ -166,6 +168,25 @@ Without `-every`, a cron entry is enough, e.g. daily at 8:00:
 ```sh
 0 8 * * * cd /path && ./harderstyles-radar
 ```
+
+## Correcting a wrong match
+
+A match is remembered for good, so a wrong one would come back on every run. `corrections.txt`, next to the cache,
+names the releases to correct. One release per line, `#` starts a comment:
+
+```
+# <id>  retry                 look it up again
+# <id>  skip  <spotify-uri>   never take this Spotify track
+1234567  retry
+1234890  skip  spotify:track:abc
+```
+
+The id is the track id on hardstyle.com. `retry` drops the remembered track once and searches again. `skip`
+remembers the Spotify track and never picks it again, then searches for another one. The file is read on every run,
+so it works the same for cron and `-no-tui`. A missing file does nothing.
+
+In the interface, `r` on the marked release writes a `retry` line and `u` writes a `skip` line for its Spotify
+track. Both start a run straight away. They do nothing while a run is going.
 
 ## Service mode: check for new tracks every 15 minutes
 

@@ -88,7 +88,7 @@ func (m *model) View() string {
 		rows = append(rows, "")
 	}
 	rows = append(rows[:m.height-len(m.footer())], m.footer()...)
-	return m.paint(rows)
+	return m.overlay(m.paint(rows))
 }
 
 // zip puts two columns of boxes next to each other, with a gap between them.
@@ -112,10 +112,18 @@ func zip(left, right []string) []string {
 }
 
 // paint fills every row up to the width and paints the surface color behind it, so the interface reaches the
-// edges of the terminal and looks the same in every terminal.
+// edges of the terminal and looks the same in every terminal. Without color the reset is left off, otherwise
+// every line would end in an escape sequence that does nothing.
 func (m *model) paint(rows []string) string {
-	background := sequenceOf(theme.Background)
 	out := make([]string, len(rows))
+	if colorDisabled() {
+		for i, row := range rows {
+			row = fit(row, m.width)
+			out[i] = row + strings.Repeat(" ", max(0, m.width-ansi.StringWidth(row)))
+		}
+		return strings.Join(out, "\n")
+	}
+	background := sequenceOf(theme.Background)
 	for i, row := range rows {
 		row = fit(row, m.width)
 		row += strings.Repeat(" ", max(0, m.width-ansi.StringWidth(row)))
@@ -152,6 +160,9 @@ func (m *model) hints() []keyHint {
 		hints = append(hints, keyHint{"x", i18n.T("abbrechen", "cancel")})
 	} else {
 		hints = append(hints, keyHint{"s", i18n.T("synchronisieren", "sync")}, keyHint{"d", i18n.T("Testlauf", "Dry run")})
+		if m.opts.Correct != nil {
+			hints = append(hints, keyHint{"r", i18n.T("neu suchen", "search again")}, keyHint{"u", i18n.T("überspringen", "skip")})
+		}
 	}
 	if len(m.opts.Genres) > 1 {
 		hints = append(hints, keyHint{"g", "Genre"})
@@ -417,6 +428,8 @@ func (m *model) helpLines(width int) []string {
 		{"s", i18n.T("jetzt synchronisieren", "sync now")},
 		{"x / Esc", i18n.T("laufenden Lauf abbrechen", "cancel the running run")},
 		{"d", i18n.T("Testlauf an oder aus (schreibt nichts)", "dry run on or off (writes nothing)")},
+		{"r", i18n.T("markiertes Release neu suchen", "search the marked release again")},
+		{"u", i18n.T("Spotify-Track des markierten Releases nie wieder nehmen", "never take the Spotify track of the marked release")},
 		{"g", i18n.T("nach Genre filtern", "filter by genre")},
 		{"l", i18n.T("Protokoll statt Releases zeigen", "show the log instead of the releases")},
 		{"?", i18n.T("diese Hilfe", "this help")},

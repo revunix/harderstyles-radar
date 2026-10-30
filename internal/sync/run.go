@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hardstylesync/internal/cache"
 	"hardstylesync/internal/config"
+	"hardstylesync/internal/corrections"
 	"hardstylesync/internal/event"
 	"hardstylesync/internal/hardstyle"
 	"hardstylesync/internal/i18n"
@@ -69,6 +70,7 @@ func run(ctx context.Context, hc *http.Client, sp *spotify.Client, cfg config.Co
 	if err != nil {
 		emit.Logf(i18n.T("Zwischenspeicher nicht lesbar: %v", "Cache not readable: %v"), err)
 	}
+	applyCorrections(cfg.CorrectionsFile, c, emit)
 
 	// While Spotify blocks the app nothing is asked: every request could prolong the block. With fallback apps
 	// that holds when all of them are blocked; the client starts with the first one that is not.
@@ -177,6 +179,36 @@ func interleave(lists [][]hardstyle.Track) []hardstyle.Track {
 func logEmit(ev event.Event) {
 	if ev.Kind == event.EvLog {
 		log.Print(ev.Msg)
+	}
+}
+
+// applyCorrections reads the corrections file and applies it to the cache: a retry drops the remembered track,
+// a skip refuses one Spotify track for good. Both make the next lookup of that release happen again. A line that
+// cannot be read is reported and skipped. The cache is saved at once, so a cancelled run does not lose it.
+func applyCorrections(path string, c *cache.Cache, emit event.Emit) {
+	if path == "" {
+		return
+	}
+	list, err := corrections.Parse(path)
+	if err != nil {
+		emit.Logf(i18n.T("Korrekturen nicht vollständig gelesen: %v", "Corrections not fully read: %v"), err)
+	}
+	if len(list) == 0 {
+		return
+	}
+	for _, corr := range list {
+		t := hardstyle.Track{ID: corr.ID}
+		switch corr.Action {
+		case corrections.Retry:
+			c.Forget(t)
+		case corrections.Skip:
+			c.Reject(t, corr.URI)
+		case corrections.Force:
+			c.Force(t, corr.URI)
+		}
+	}
+	if err := c.Save(); err != nil {
+		emit.Logf(i18n.T("Korrekturen nicht gespeichert: %v", "Corrections not saved: %v"), err)
 	}
 }
 

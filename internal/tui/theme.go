@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 // The look follows orangeflix-dl, in the colors of the two brands: the blue of hardstyle.com and the green of
@@ -50,7 +51,21 @@ type themeStyles struct {
 
 var theme = newTheme()
 
+func init() {
+	// lipgloss reads the environment once, before this package's variables are
+	// set, so the profile is forced here. Tests that paint with color set their
+	// own profile and are unaffected.
+	if colorDisabled() {
+		lipgloss.SetColorProfile(termenv.Ascii)
+	}
+}
+
 func newTheme() themeStyles {
+	if colorDisabled() {
+		// Every style renders its text unchanged, so the layout stays and only
+		// the color goes.
+		return themeStyles{}
+	}
 	fg := func(c lipgloss.Color) lipgloss.Style { return lipgloss.NewStyle().Foreground(c) }
 	text := pick("#18181b", "#fafafa")
 	bg := pick("#f8fafc", "#09090b")
@@ -72,6 +87,17 @@ func newTheme() themeStyles {
 		BoxActive:  fg(pick("#0541E3", "#3D6BFF")),
 		BoxQuiet:   fg(pick("#d4d4d8", "#3f3f46")),
 	}
+}
+
+// colorDisabled reports whether the user switched color off. NO_COLOR is the
+// convention every tool shares (https://no-color.org); TERM=dumb is what a
+// terminal says when it cannot do color at all. Either one means plain text,
+// so a log that records the output does not fill up with escape sequences.
+func colorDisabled() bool {
+	if _, off := os.LookupEnv("NO_COLOR"); off {
+		return true
+	}
+	return os.Getenv("TERM") == "dumb"
 }
 
 // detectDarkBackground guesses the background of the terminal from COLORFGBG.
@@ -121,8 +147,12 @@ func gradientText(text string) string {
 	return b.String()
 }
 
-// sequenceOf returns the escape sequence a style starts with.
+// sequenceOf returns the escape sequence a style starts with. With color switched
+// off there is none, and the callers that bookend a line with it stay plain too.
 func sequenceOf(style lipgloss.Style) string {
+	if colorDisabled() {
+		return ""
+	}
 	rendered := style.Render(" ")
 	if i := strings.Index(rendered, "m"); i > 0 {
 		return rendered[:i+1]

@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 )
@@ -44,6 +45,8 @@ type Entry struct {
 	SpotifyDate string    `json:"spotify_date,omitempty"` // release date of the match on Spotify
 	Reason      string    `json:"reason,omitempty"`       // why it is missing: spotify.ReasonNotFound or spotify.ReasonDate
 	Tries       int       `json:"tries,omitempty"`        // how often it was searched without success
+	Rejected    []string  `json:"rejected,omitempty"`     // Spotify tracks a correction refused; they are never chosen again
+	Forced      string    `json:"forced,omitempty"`       // a Spotify track a correction chose by hand; it wins over the search
 }
 
 // DetailsDue tells whether the page of the release on hardstyle.com has to be read (again): it was never read,
@@ -190,10 +193,30 @@ type Found struct {
 	DaysOff     int    // the date of the match is this many days off
 }
 
-// SetFound remembers the Spotify tracks of a release.
+// SetFound remembers the Spotify tracks of a release. A track a correction refused is left out; if that was
+// the only one, the release counts as not found.
 func (c *Cache) SetFound(t hardstyle.Track, f Found) {
 	c.update(t, func(e *Entry) {
-		e.URI, e.Extra = f.URIs[0], append([]string(nil), f.URIs[1:]...)
+		uris := f.URIs
+		if len(e.Rejected) > 0 {
+			drop := map[string]bool{}
+			for _, u := range e.Rejected {
+				drop[u] = true
+			}
+			kept := uris[:0:0]
+			for _, u := range uris {
+				if !drop[u] {
+					kept = append(kept, u)
+				}
+			}
+			uris = kept
+		}
+		if len(uris) == 0 {
+			e.URI, e.Extra = "", nil
+			e.At, e.Reason = time.Now(), "notfound"
+			return
+		}
+		e.URI, e.Extra = uris[0], append([]string(nil), uris[1:]...)
 		e.At, e.SpotifyDate, e.Reason, e.Tries = time.Now(), f.SpotifyDate, "", 0
 		e.Album, e.AlbumID, e.DaysOff = f.Album, f.AlbumID, f.DaysOff
 	})
@@ -227,6 +250,52 @@ func (c *Cache) SetAlbum(id string, a AlbumEntry) {
 // MarkDue makes the next run look a release up again, even if the last answer still holds.
 func (c *Cache) MarkDue(t hardstyle.Track) {
 	c.update(t, func(e *Entry) { e.At = time.Time{} })
+}
+
+// Force sets the Spotify track of a release by hand. It wins over whatever the search would find, and it is
+// not searched again.
+func (c *Cache) Force(t hardstyle.Track, uri string) {
+	c.update(t, func(e *Entry) {
+		e.Forced = uri
+		e.URI, e.Extra = uri, nil
+		e.Album, e.AlbumID, e.DaysOff = false, "", 0
+		e.At, e.Reason = time.Now(), ""
+	})
+}
+
+// Forget drops the Spotify track of a release, so the next run looks it up again. The refused tracks stay.
+func (c *Cache) Forget(t hardstyle.Track) {
+	c.update(t, func(e *Entry) {
+		e.URI, e.Extra, e.Album, e.AlbumID, e.DaysOff = "", nil, false, "", 0
+		e.At, e.SpotifyDate, e.Reason = time.Time{}, "", ""
+	})
+}
+
+// Reject refuses a Spotify track for a release for good and drops the current match, so the next run looks for
+// another one. The same track is remembered only once.
+func (c *Cache) Reject(t hardstyle.Track, uri string) {
+	c.update(t, func(e *Entry) {
+		if uri != "" && !slices.Contains(e.Rejected, uri) {
+			e.Rejected = append(e.Rejected, uri)
+		}
+		drop := map[string]bool{uri: uri != ""}
+		for _, u := range e.Rejected {
+			drop[u] = true
+		}
+		if drop[e.URI] {
+			// The whole match goes: a remix remembered next to a refused track would bring it back.
+			e.URI, e.Extra, e.Album, e.AlbumID, e.DaysOff = "", nil, false, "", 0
+			e.At, e.SpotifyDate, e.Reason = time.Time{}, "", ""
+			return
+		}
+		kept := e.Extra[:0]
+		for _, u := range e.Extra {
+			if !drop[u] {
+				kept = append(kept, u)
+			}
+		}
+		e.Extra = kept
+	})
 }
 
 func (c *Cache) SetMissing(t hardstyle.Track, reason, spotifyDate string) {

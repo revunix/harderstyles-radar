@@ -5,6 +5,7 @@ import (
 	"hardstylesync/internal/spotify"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -96,6 +97,41 @@ func TestBetterMatchingLooksAgainForWhatWasMissing(t *testing.T) {
 	}
 	if c2.f.Matcher != matcherVersion {
 		t.Errorf("matcher = %d", c2.f.Matcher)
+	}
+}
+
+func TestARefusedTrackIsNeverTakenAgain(t *testing.T) {
+	c, path := newCache(t)
+	tr := hardstyle.Track{ID: "x", Title: "T", Artist: "A"}
+	c.SetFound(tr, Found{URIs: []string{"spotify:track:1", "spotify:track:2"}, SpotifyDate: "2026-10-29"})
+
+	c.Reject(tr, "spotify:track:1")
+	e, _ := c.Entry(tr)
+	if e.URI != "" || len(e.Extra) != 0 || !e.At.IsZero() || !slices.Equal(e.Rejected, []string{"spotify:track:1"}) {
+		t.Fatalf("after reject: %+v", e)
+	}
+	// Refusing the same track twice remembers it once.
+	c.Reject(tr, "spotify:track:1")
+	if e, _ = c.Entry(tr); len(e.Rejected) != 1 {
+		t.Errorf("rejected twice: %v", e.Rejected)
+	}
+
+	// Looking it up again must not bring the refused track back, not even as a remix next to another match.
+	c.SetFound(tr, Found{URIs: []string{"spotify:track:1", "spotify:track:3"}, SpotifyDate: "2026-10-29"})
+	if e, _ = c.Entry(tr); e.URI != "spotify:track:3" || len(e.Extra) != 0 {
+		t.Errorf("the refused track came back: %+v", e)
+	}
+
+	c.Forget(tr)
+	if e, _ = c.Entry(tr); e.URI != "" || !e.At.IsZero() || len(e.Rejected) != 1 {
+		t.Errorf("forget drops the match but keeps the refusal: %+v", e)
+	}
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+	c2, _ := Load(path)
+	if e, ok := c2.Entry(tr); !ok || !slices.Equal(e.Rejected, []string{"spotify:track:1"}) {
+		t.Errorf("the refusal must survive a reload: %+v %v", e, ok)
 	}
 }
 

@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"hardstylesync/internal/cache"
 	"hardstylesync/internal/config"
+	"hardstylesync/internal/corrections"
+	"hardstylesync/internal/event"
 	"hardstylesync/internal/hardstyle"
 	"hardstylesync/internal/spotify"
 	"net/http"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -236,12 +239,12 @@ func TestDesiredOrder(t *testing.T) {
 		{uris: []string{"u4"}}, // date unknown: last of the found
 		{uris: []string{"u2"}, date: "2026-10-29"}, // twice the same track
 	}
-	got := desiredOrder(known, []string{"old1", "u1", "old2"}, 100, false)
+	got := desiredOrder(known, []string{"old1", "u1", "old2"}, nil, 100, false)
 	want := []string{"u2", "u2b", "u3", "u1", "u4", "old1", "old2"}
 	if !slices.Equal(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
-	if got := desiredOrder(known, []string{"old1"}, 3, false); !slices.Equal(got, []string{"u2", "u2b", "u3"}) {
+	if got := desiredOrder(known, []string{"old1"}, nil, 3, false); !slices.Equal(got, []string{"u2", "u2b", "u3"}) {
 		t.Errorf("capped: %v", got)
 	}
 }
@@ -253,11 +256,36 @@ func TestOneListKeepsTheOrderOfTheSite(t *testing.T) {
 		{uris: []string{"u2"}, date: "2026-10-29"},
 		{uris: []string{"u3"}, date: "2026-10-25"},
 	}
-	if got := desiredOrder(known, []string{"old"}, 100, true); !slices.Equal(got, []string{"u1", "u2", "u3", "old"}) {
+	if got := desiredOrder(known, []string{"old"}, nil, 100, true); !slices.Equal(got, []string{"u1", "u2", "u3", "old"}) {
 		t.Errorf("one list: %v", got)
 	}
-	if got := desiredOrder(known, []string{"old"}, 100, false); !slices.Equal(got, []string{"u2", "u3", "u1", "old"}) {
+	if got := desiredOrder(known, []string{"old"}, nil, 100, false); !slices.Equal(got, []string{"u2", "u3", "u1", "old"}) {
 		t.Errorf("several lists: %v", got)
+	}
+}
+
+func TestAForcedTrackIsKeptAsTyped(t *testing.T) {
+	c, _ := newCache(t)
+	path := filepath.Join(t.TempDir(), "corrections.txt")
+	if err := corrections.Record(path, corrections.Correction{ID: "999", Action: corrections.Force, URI: "spotify:track:hand"}); err != nil {
+		t.Fatal(err)
+	}
+	applyCorrections(path, c, func(event.Event) {})
+	e, ok := c.Entry(hardstyle.Track{ID: "999"})
+	if !ok || e.URI != "spotify:track:hand" || e.Forced != "spotify:track:hand" || !e.Usable() {
+		t.Fatalf("a forced track must be kept and not searched again: %+v %v", e, ok)
+	}
+}
+
+func TestARefusedTrackDropsOutOfThePlaylist(t *testing.T) {
+	known := []resolved{
+		{uris: []string{"kept"}, date: "2026-10-29"},
+		{uris: []string{"other"}, date: "2026-10-28"},
+	}
+	// "refused" is in the playlist now, but a correction refused it, so it must not come back through the tail.
+	got := desiredOrder(known, []string{"kept", "refused"}, []string{"refused"}, 100, true)
+	if !slices.Equal(got, []string{"kept", "other"}) {
+		t.Errorf("got %v, want the refused track gone", got)
 	}
 
 	f := &fakeSpotify{}

@@ -213,6 +213,10 @@ func checkAlbums(ctx context.Context, sp *spotify.Client, releases []hardstyle.T
 		}
 		// needs tells whether a member is not yet a track of the album.
 		needs := func(m int) bool {
+			// A track a correction chose by hand stays as it is; the album check must not replace it.
+			if entry(m).Forced != "" {
+				return false
+			}
 			return known[m].deferred || len(known[m].uris) == 0 || entry(m).AlbumID != v.album.ID
 		}
 		if !slices.ContainsFunc(g.members, needs) {

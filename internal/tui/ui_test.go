@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
 
+	"hardstylesync/internal/corrections"
 	"hardstylesync/internal/event"
 	"hardstylesync/internal/hardstyle"
 	"hardstylesync/internal/i18n"
@@ -66,6 +68,30 @@ func TestViewFitsTheWindow(t *testing.T) {
 					}
 				}
 			}
+		}
+	}
+}
+
+// TestNoColorIsPlainText checks the two ways a user switches color off. The
+// theme is built while the package loads, so the variables are set before the
+// test binary starts and the view must come out without a single escape sequence.
+func TestNoColorIsPlainText(t *testing.T) {
+	if os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb" {
+		t.Skip("set NO_COLOR or TERM=dumb")
+	}
+	for _, size := range [][2]int{{120, 36}, {80, 24}} {
+		m := demoModel(size[0], size[1], 30)
+		view := m.View()
+		if strings.Contains(view, "\x1b") {
+			t.Errorf("%dx%d: NO_COLOR output still contains escape sequences:\n%s", size[0], size[1], view)
+		}
+		lines := strings.Split(view, "\n")
+		if len(lines) != size[1] {
+			t.Errorf("%dx%d: %d lines, want %d", size[0], size[1], len(lines), size[1])
+		}
+		// Below twoColumnsAt the list stands alone, so the detail column is only there when it fits.
+		if !strings.Contains(view, "Track Nummer 1") || size[0] >= twoColumnsAt && !strings.Contains(view, "Playlist") {
+			t.Errorf("%dx%d: the plain view lost its content", size[0], size[1])
 		}
 	}
 }
@@ -161,7 +187,101 @@ func TestKeysDuringRun(t *testing.T) {
 	}
 }
 
-// Run with HS_DUMP=1 to see the frame as text.
+func TestRightClickOpensTheMenuAndEnterAppliesIt(t *testing.T) {
+	m := demoModel(120, 36, 30)
+	m.running = false
+	m.items[0].track.ID = "111"
+	// The demo follows the run to the end of the list; the test wants the top.
+	m.selected, m.offset = 0, 0
+
+	// The first release row is the first line of the list that rowAt accepts.
+	list, _, _, _ := m.layout()
+	row := -1
+	for y := list.y; y < list.y+list.h; y++ {
+		if pos, ok := m.rowAt(list.x+2, y); ok && pos == 0 {
+			row = y
+			break
+		}
+	}
+	if row < 0 {
+		t.Fatal("no row of the list accepts a click")
+	}
+	click := func(button tea.MouseButton) {
+		m.Update(tea.MouseMsg{X: list.x + 2, Y: row, Button: button, Action: tea.MouseActionPress})
+	}
+	click(tea.MouseButtonRight)
+	if m.menu == nil || m.menu.item != 0 {
+		t.Fatalf("right click should open the menu for the first release, got %+v", m.menu)
+	}
+
+	var got []string
+	m.opts.Correct = func(id, action, uri string) error {
+		got = []string{id, action, uri}
+		return nil
+	}
+	// The first action is "search again".
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !slices.Equal(got, []string{"111", corrections.Retry, ""}) || m.menu != nil {
+		t.Errorf("enter recorded %v, menu open = %v", got, m.menu != nil)
+	}
+
+	// A typed Spotify track is taken as given, the prefix added when it was left off.
+	click(tea.MouseButtonRight)
+	for range len(m.menu.actions) - 1 {
+		m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	for _, r := range "abc123" {
+		m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !slices.Equal(got, []string{"111", corrections.Force, "spotify:track:abc123"}) {
+		t.Errorf("a typed track recorded %v", got)
+	}
+
+	// A paste arrives as one message. A trailing newline from the clipboard must not become part of the id.
+	click(tea.MouseButtonRight)
+	for range len(m.menu.actions) - 1 {
+		m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Paste: true, Runes: []rune("pasteID\n")})
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !slices.Equal(got, []string{"111", corrections.Force, "spotify:track:pasteID"}) {
+		t.Errorf("a pasted track recorded %v", got)
+	}
+}
+
+func TestCorrectionKeysRecordTheMarkedRelease(t *testing.T) {
+	m := demoModel(120, 36, 30)
+	m.running = false
+	m.items[0].track.ID = "111"
+	m.selected = 0
+	uri := m.items[0].uri
+
+	var got []string
+	m.opts.Correct = func(id, action, uri string) error {
+		got = []string{id, action, uri}
+		return nil
+	}
+	m.opts.Run = func(context.Context, bool, bool, event.Emit) (sync.Result, error) {
+		return sync.Result{}, nil
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")})
+	if !slices.Equal(got, []string{"111", "skip", uri}) {
+		t.Errorf("skip recorded %v", got)
+	}
+
+	// A second model, still in its run: the key must not record anything.
+	busy := demoModel(120, 36, 30)
+	busy.items[0].track.ID = "111"
+	busy.opts.Correct = m.opts.Correct
+	got = nil
+	busy.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if got != nil {
+		t.Errorf("a correction during a run recorded %v", got)
+	}
+}
 
 // Run with HS_DUMP=1 to see the frame as text.
 func TestDump(t *testing.T) {

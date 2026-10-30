@@ -10,7 +10,7 @@ import (
 func Run(ctx context.Context, opts Options) error {
 	m := newModel(ctx, opts)
 	m.splash = true
-	m.program = tea.NewProgram(m, tea.WithAltScreen())
+	m.program = tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := m.program.Run()
 	return err
 }

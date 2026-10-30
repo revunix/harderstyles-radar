@@ -16,6 +16,7 @@ import (
 
 	"hardstylesync/internal/cache"
 	"hardstylesync/internal/config"
+	"hardstylesync/internal/corrections"
 	"hardstylesync/internal/event"
 	"hardstylesync/internal/i18n"
 	"hardstylesync/internal/spotify"
@@ -89,6 +90,9 @@ func main() {
 			MaxSearches: cfg.MaxSearches, Apps: sp.Apps, RequestDelay: cfg.RequestDelay, ContinueDelay: cfg.ContinueDelay,
 			Run: func(ctx context.Context, dryRun, quick bool, emit event.Emit) (sync.Result, error) {
 				return sync.Run(ctx, httpClient, sp, cfg, dryRun, quick, emit)
+			},
+			Correct: func(id, action, uri string) error {
+				return corrections.Record(cfg.CorrectionsFile, corrections.Correction{ID: id, Action: action, URI: uri})
 			},
 		}); err != nil {
 			log.Fatal(err)

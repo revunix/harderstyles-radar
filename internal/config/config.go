@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +23,7 @@ type Config struct {
 	Credentials                                []spotify.Credential
 	Genres                                     []string
 	CacheFile                                  string
+	CorrectionsFile                            string // releases whose Spotify track was refused; empty derives it from the cache file
 	Pages, MaxTracks                           int
 	MaxSearches, DateTolerance, AlbumMinTracks int
 	RequestDelay, ContinueDelay, WatchInterval time.Duration
@@ -35,14 +37,15 @@ var allGenres = []string{"Hardstyle", "Hardcore", "Uptempo", "Frenchcore", "Free
 
 func Load(needRefresh bool) (Config, error) {
 	c := Config{
-		ClientID:     os.Getenv("SPOTIFY_CLIENT_ID"),
-		ClientSecret: os.Getenv("SPOTIFY_CLIENT_SECRET"),
-		RefreshToken: os.Getenv("SPOTIFY_REFRESH_TOKEN"),
-		PlaylistID:   os.Getenv("SPOTIFY_PLAYLIST_ID"),
-		Pages:        envInt("PAGES", 0), // 0: decided below, it depends on the genres
-		MaxTracks:    envInt("MAX_TRACKS", 500),
-		CacheFile:    envStr("CACHE_FILE", ".hardstyle-sync-cache.json"),
-		Description:  os.Getenv("PLAYLIST_DESCRIPTION"),
+		ClientID:        os.Getenv("SPOTIFY_CLIENT_ID"),
+		ClientSecret:    os.Getenv("SPOTIFY_CLIENT_SECRET"),
+		RefreshToken:    os.Getenv("SPOTIFY_REFRESH_TOKEN"),
+		PlaylistID:      os.Getenv("SPOTIFY_PLAYLIST_ID"),
+		Pages:           envInt("PAGES", 0), // 0: decided below, it depends on the genres
+		MaxTracks:       envInt("MAX_TRACKS", 500),
+		CacheFile:       envStr("CACHE_FILE", ".hardstyle-sync-cache.json"),
+		CorrectionsFile: envStr("CORRECTIONS_FILE", ""),
+		Description:     os.Getenv("PLAYLIST_DESCRIPTION"),
 		// Spotify limits the requests in a time window and may block an app for a day, so everything is slow
 		// and small by default.
 		MaxSearches:   envInt("MAX_SEARCHES", 100),
@@ -112,6 +115,9 @@ func Load(needRefresh bool) (Config, error) {
 	}
 	if c.MaxTracks < 1 || c.Pages < 1 {
 		return c, errors.New(i18n.T("MAX_TRACKS und PAGES müssen mindestens 1 sein", "MAX_TRACKS and PAGES must be at least 1"))
+	}
+	if c.CorrectionsFile == "" {
+		c.CorrectionsFile = filepath.Join(filepath.Dir(c.CacheFile), "corrections.txt")
 	}
 	if c.DiscordWebhook != "" {
 		u, err := url.Parse(c.DiscordWebhook)

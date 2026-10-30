@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hardstylesync/internal/corrections"
 	"hardstylesync/internal/event"
 	"hardstylesync/internal/hardstyle"
 	"hardstylesync/internal/i18n"
@@ -42,6 +43,9 @@ type Options struct {
 	Apps func() []spotify.AppStatus
 	// Run does one run and reports its progress. A quick run only checks for new tracks.
 	Run func(ctx context.Context, dryRun, quick bool, emit event.Emit) (sync.Result, error)
+	// Correct records a correction for one release: "retry" looks it up again, "skip" refuses the Spotify
+	// track in uri for good. Nil hides the keys.
+	Correct func(id, action, uri string) error
 }
 
 type item struct {
@@ -106,6 +110,9 @@ type model struct {
 	logView bool
 	help    bool
 
+	// menu is the window opened with a right click on a release. Nil when none is open.
+	menu *popup
+
 	// splash shows the intro with the logo of hardstyle.com; the first run starts behind it.
 	splash      bool
 	splashFrame int
@@ -151,6 +158,30 @@ func (m *model) startRun(quick bool) tea.Cmd {
 	}
 }
 
+// correct records a correction for the marked release and starts a run, so the correction takes effect at once.
+// It does nothing while a run is going, or when the marked release has nothing to correct.
+func (m *model) correct(key string) tea.Cmd {
+	if m.running || m.opts.Correct == nil {
+		return nil
+	}
+	it, ok := m.current()
+	if !ok || it.track.ID == "" || it.uri == "" {
+		return nil
+	}
+	action, uri := corrections.Retry, ""
+	text := i18n.T("erneut gesucht", "looked up again")
+	if key == "u" {
+		action, uri = corrections.Skip, it.uri
+		text = i18n.T("übersprungen", "skipped")
+	}
+	if err := m.opts.Correct(it.track.ID, action, uri); err != nil {
+		m.addLog(fmt.Sprintf(i18n.T("Korrektur nicht gespeichert: %v", "Correction not saved: %v"), err), true)
+		return nil
+	}
+	m.addLog(fmt.Sprintf(i18n.T("%s – %s wird %s", "%s – %s is %s"), it.track.Title, it.track.Artist, text), false)
+	return m.startRun(false)
+}
+
 func (m *model) addLog(text string, isErr bool) {
 	m.logs = append(m.logs, logLine{at: time.Now(), text: text, err: isErr})
 	if len(m.logs) > maxLog {
@@ -183,7 +214,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case splashDoneMsg:
 		m.splash = false
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 	case tea.KeyMsg:
+		if m.menu != nil {
+			return m.handleMenuKey(msg)
+		}
 		return m.handleKey(msg)
 	}
 	return m, nil
@@ -275,6 +311,8 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.help = true
 	case "s":
 		return m, m.startRun(false)
+	case "r", "u":
+		return m, m.correct(msg.String())
 	case "x", "esc":
 		if m.running {
 			m.cancel()

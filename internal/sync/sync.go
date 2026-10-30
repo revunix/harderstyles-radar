@@ -162,7 +162,7 @@ func Sync(ctx context.Context, sp *spotify.Client, playlistID string, releases [
 		}
 	}
 
-	final := desiredOrder(known, current, opt.MaxTracks, opt.KeepSiteOrder)
+	final := desiredOrder(known, current, refusedURIs(releases, c), opt.MaxTracks, opt.KeepSiteOrder)
 	res.After = len(final)
 	finalSet := setOf(final)
 	for _, u := range final {
@@ -289,6 +289,9 @@ func resolveAll(ctx context.Context, sp *spotify.Client, releases []hardstyle.Tr
 	// list are known.
 	fetched := map[int]bool{}
 	if opt.FetchDetails != nil {
+		// The pages are read one per second and the search has not started, so without a count of its own the
+		// run looks stuck. The pages due are counted first, then reported as they are read.
+		due := 0
 		others := 0
 		for i, tr := range releases {
 			if e, _ := c.Entry(tr); !e.DetailsDue() {
@@ -300,6 +303,22 @@ func resolveAll(ctx context.Context, sp *spotify.Client, releases []hardstyle.Tr
 				}
 				others++
 			}
+			due++
+		}
+		read := 0
+		others = 0
+		for i, tr := range releases {
+			if e, _ := c.Entry(tr); !e.DetailsDue() {
+				continue
+			}
+			if !toLookup[i] {
+				if others >= opt.MaxSearches {
+					continue
+				}
+				others++
+			}
+			read++
+			emit.Send(event.Event{Kind: event.EvPhase, Phase: event.PhaseSearch, Done: read, Total: due, Msg: tr.Title})
 			d, err := opt.FetchDetails(ctx, tr)
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
@@ -414,6 +433,16 @@ func resolveAll(ctx context.Context, sp *spotify.Client, releases []hardstyle.Tr
 			return known, stopErr
 		}
 		failures = 0
+		// A correction can refuse a Spotify track for good. It drops out of this answer, and out of the
+		// candidates the album check picks from, so it is not taken by another way.
+		if len(e.Rejected) > 0 {
+			refused := setOf(e.Rejected)
+			look.URIs = slices.DeleteFunc(look.URIs, func(u string) bool { return refused[u] })
+			look.Candidates = slices.DeleteFunc(look.Candidates, func(cd spotify.Candidate) bool { return refused[cd.Track.URI] })
+			if len(look.URIs) == 0 {
+				look.Reason = spotify.ReasonNotFound
+			}
+		}
 		cands[i] = look.Candidates
 		if len(look.URIs) > 0 {
 			c.SetFound(tr, cache.Found{URIs: look.URIs, SpotifyDate: look.SpotifyDate, AlbumID: albumOf(look), DaysOff: look.DaysOff})
@@ -468,6 +497,16 @@ func statusOf(r resolved, inPlaylist map[string]bool) event.Status {
 	return event.StatusNew
 }
 
+// refusedURIs collects the Spotify tracks a correction refused, over all releases of the run.
+func refusedURIs(releases []hardstyle.Track, c *cache.Cache) []string {
+	var out []string
+	for _, t := range releases {
+		e, _ := c.Entry(t)
+		out = append(out, e.Rejected...)
+	}
+	return out
+}
+
 func setOf(items []string) map[string]bool {
 	m := make(map[string]bool, len(items))
 	for _, s := range items {
@@ -478,8 +517,9 @@ func setOf(items []string) map[string]bool {
 
 // desiredOrder returns the playlist as it should be: the found tracks in the order of hardstyle.com (newest
 // release date first, then the order of the site's list), then the tracks that are in the playlist but not among
-// the latest releases any more, in the order they have. At most max tracks; the end drops out.
-func desiredOrder(known []resolved, current []string, limit int, keepSiteOrder bool) []string {
+// the latest releases any more, in the order they have. A track a correction refused is left out, even if it is
+// in the playlist now. At most max tracks; the end drops out.
+func desiredOrder(known []resolved, current, refused []string, limit int, keepSiteOrder bool) []string {
 	type entry struct {
 		uris  []string
 		date  string
@@ -500,6 +540,10 @@ func desiredOrder(known []resolved, current []string, limit int, keepSiteOrder b
 	})
 	final := make([]string, 0, len(found)+len(current))
 	seen := map[string]bool{}
+	for _, u := range refused {
+		// Marked as seen before anything is added, so the refused track is neither added nor kept.
+		seen[u] = true
+	}
 	for _, f := range found {
 		for _, u := range f.uris {
 			if !seen[u] {

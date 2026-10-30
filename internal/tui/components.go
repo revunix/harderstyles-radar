@@ -69,7 +69,12 @@ func renderBox(width, height int, title string, frame lipgloss.Style, content []
 			line = fit(content[i], inner)
 		}
 		middle := " " + line + strings.Repeat(" ", max(0, inner-ansi.StringWidth(line))) + " "
-		lines = append(lines, frame.Render(boxV)+withBackground(middle, panel)+"\x1b[0m"+frame.Render(boxV))
+		// The reset only exists to end the panel color. Without color it would be an escape sequence that
+		// does nothing, so it is left off.
+		if panel != "" {
+			middle = withBackground(middle, panel) + "\x1b[0m"
+		}
+		lines = append(lines, frame.Render(boxV)+middle+frame.Render(boxV))
 	}
 	return append(lines, frame.Render(boxBL+strings.Repeat(boxH, width-2)+boxBR))
 }
