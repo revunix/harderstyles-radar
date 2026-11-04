@@ -171,7 +171,11 @@ func Load(path string) (*Cache, error) {
 				e.At = time.Time{} // not searched yet, as far as the new matching is concerned
 			case e.URI != "" && e.Forced == "" && staleMatch(e.Date, e.SpotifyDate):
 				// The track came out at another time than the release (an old re-master or compilation): it
-				// must not stay in a playlist of the newest releases, so the release is looked up again.
+				// must not stay in a playlist of the newest releases. It is remembered as refused, so the run
+				// takes it out of the playlist and never picks it again for this release.
+				if !slices.Contains(e.Rejected, e.URI) {
+					e.Rejected = append(e.Rejected, e.URI)
+				}
 				e = Entry{ISRC: e.ISRC, Catalog: e.Catalog, Date: e.Date, DateExact: e.DateExact,
 					DetailsV: e.DetailsV, Rejected: e.Rejected}
 			}

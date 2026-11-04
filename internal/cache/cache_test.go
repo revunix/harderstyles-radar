@@ -205,8 +205,8 @@ func TestAMatchOfAnotherTimeIsDroppedOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if e, _ := again.Entry(old); e.URI != "" || e.ISRC != "GB1" {
-		t.Errorf("old match = %+v, want it dropped and the ISRC kept", e)
+	if e, _ := again.Entry(old); e.URI != "" || e.ISRC != "GB1" || !slices.Contains(e.Rejected, "spotify:track:OLD") {
+		t.Errorf("old match = %+v, want it dropped, the ISRC kept and the track refused", e)
 	}
 	if e, _ := again.Entry(same); e.URI != "spotify:track:SAME" {
 		t.Errorf("a match of the right day must stay: %+v", e)
