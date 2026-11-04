@@ -2,7 +2,6 @@ package cache
 
 import (
 	"hardstylesync/internal/hardstyle"
-	"hardstylesync/internal/spotify"
 	"os"
 	"path/filepath"
 	"slices"
@@ -78,7 +77,7 @@ func TestCacheIgnoresAnOldFormat(t *testing.T) {
 func TestBetterMatchingLooksAgainForWhatWasMissing(t *testing.T) {
 	c, path := newCache(t)
 	tr := hardstyle.Track{ID: "a", Title: "Lose Control", Artist: "Juliex"}
-	c.SetMissing(tr, spotify.ReasonNotFound, "")
+	c.SetMissing(tr, "notfound", "")
 	c.SetFound(hardstyle.Track{ID: "b", Title: "Found", Artist: "A"}, Found{URIs: []string{"spotify:track:B"}, SpotifyDate: "2026-10-29"})
 	if e, _ := c.Entry(tr); !e.Usable() {
 		t.Fatal("a fresh missing entry holds")
@@ -148,5 +147,41 @@ func TestLegacyBlockMovesToTheFirstApp(t *testing.T) {
 	c.AdoptLegacyBlock("a")
 	if c.BlockedUntil("a").IsZero() || !c.BlockedUntil("b").IsZero() {
 		t.Errorf("a = %v, b = %v", c.BlockedUntil("a"), c.BlockedUntil("b"))
+	}
+}
+
+func TestAnEstimateDoesNotReplaceAnExactDay(t *testing.T) {
+	c, _ := newCache(t)
+	tr := hardstyle.Track{ID: "ht1", Title: "Song", Artist: "A"}
+	c.RememberDate(tr, "2026-10-30") // the list said "Today"
+	c.SetDetails(tr, hardstyle.Details{Date: "2026-10-27", DateApprox: true, ISRC: "NL1"})
+	if e, _ := c.Entry(tr); e.Date != "2026-10-30" || !e.DateExact || e.ISRC != "NL1" || e.DetailsDue() {
+		t.Errorf("entry = %+v: the day stays, the ISRC comes in, the page counts as read", e)
+	}
+	c.SetDetails(tr, hardstyle.Details{Date: "2026-10-31"}) // the release page names the day
+	if e, _ := c.Entry(tr); e.Date != "2026-10-31" || !e.DateExact {
+		t.Errorf("an exact day from the page wins: %+v", e)
+	}
+	other := hardstyle.Track{ID: "ht2", Title: "Other", Artist: "A"}
+	c.SetDetails(other, hardstyle.Details{Date: "2026-10-27", DateApprox: true})
+	if e, _ := c.Entry(other); e.Date != "2026-10-27" || e.DateExact {
+		t.Errorf("an estimate is better than nothing, but not exact: %+v", e)
+	}
+}
+
+func TestLearnedArtistsSurviveASave(t *testing.T) {
+	c, path := newCache(t)
+	c.LearnArtist("smurf", "id1")
+	c.LearnArtist("smurf", "id1")
+	c.LearnArtist("smurf", "id2")
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := again.ArtistIDs("smurf"); !slices.Equal(got, []string{"id1", "id2"}) {
+		t.Errorf("ids = %v", got)
 	}
 }

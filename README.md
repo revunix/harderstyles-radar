@@ -1,9 +1,9 @@
 # harderstyles-radar
 
 A single Go binary that keeps a Spotify playlist in sync with the latest hardstyle releases on
-[hardstyle.com](https://hardstyle.com). It reads the track lists of the site, finds every release on Spotify and
-writes the playlist in the same order as the site: newest first. The playlist holds at most `MAX_TRACKS` tracks
-(default 500); beyond that, the oldest entries drop off the end.
+[hardstyle.com](https://hardstyle.com) and [hardtunes.com](https://www.hardtunes.com). It reads the newest
+`MAX_TRACKS` releases (default 500) of the track lists of both sites, finds them on Spotify and writes the
+playlist, newest first or sorted as `PLAYLIST_ORDER` says. A new release pushes the oldest out.
 
 The tool runs as an interactive terminal UI (TUI) or as a plain command for cron and service use. It remembers what
 it has already looked up, so a daily run only searches the new releases. A service mode checks the site every 15
@@ -11,10 +11,15 @@ minutes and touches Spotify only when something new appeared.
 
 ## Features
 
-- **Same order as hardstyle.com** — newest release date first, for equal dates the order of the page. Checked on
+- **Only the newest `MAX_TRACKS`** — the lists of all genres of both sites are merged by release date and read
+  page by page only as far as the newest `MAX_TRACKS` releases reach; only those are looked up on Spotify. A new
+  release pushes the oldest out, of the search as of the playlist.
+- **Your order** — newest first (default), oldest first, by artist or by title (`PLAYLIST_ORDER`). Checked on
   every start and corrected when needed.
-- **Finds the right track** — ISRC first, then title, artist and date, with tolerance for accents, spelling and
-  release dates a few days apart.
+- **Finds the right track** — ISRC first, then a score of title, artists, track length, version and date. The
+  length tells an Extended Mix from a Radio Edit; when two recordings fit almost equally, none is guessed and
+  the release is marked “uncertain”. Artist aliases are learned from ISRC matches. `-evaluate` measures the
+  matching offline.
 - **Albums stay together** — releases that share a catalog number are taken from one Spotify album, including
   older songs on it.
 - **Only new releases are searched** — matches, dates and the playlist live in a cache; a repeated run costs one
@@ -23,8 +28,16 @@ minutes and touches Spotify only when something new appeared.
   optional full run per day (`-every 24h`). Nothing new means no request to Spotify at all.
 - **Several genres or one mixed list** — `GENRES=all` for every genre separately, `GENRES=any` for the general
   list at hardstyle.com/en/tracks, or a comma-separated selection.
+- **Second source: hardtunes.com** — every run also reads the genre lists of hardtunes.com (`HARDTUNES_GENRES`),
+  which has releases hardstyle.com lacks. A release on both sites is taken once, from hardstyle.com; an album on
+  hardtunes.com is replaced by its tunes. `-compare` shows what is on both sites and what only on one, no Spotify
+  needed.
+- **Every genre can keep its place** — `GENRE_MIN` keeps the newest releases of every genre in the window, however
+  busy the others are.
+- **Notices when a site changes** — unreadable or empty lists, missing dates or lengths are reported as warnings,
+  in the log and on Discord; an unreadable list is skipped, not the whole run.
 - **Easy on the Spotify API** — a pause between requests, a search limit per run, and a stored block when Spotify
-  rate-limits the app.
+  rate-limits the app. A release that is not out yet is not searched before its day.
 - **Fallback apps** — a second and third Spotify app take over when the first one is blocked.
 - **Dry run** — shows what would change without writing anything.
 - **Discord summary** — every full run, and every check that found new tracks, reports to a Discord webhook: what
@@ -125,8 +138,12 @@ precedence over the file. `.env` is listed in `.gitignore`.
 | `SPOTIFY_CLIENT_ID_2` / `_SECRET_2` / `_REFRESH_TOKEN_2` (then `_3` …) | no | | Fallback app that takes over when Spotify blocks the first one. Get the token with `-auth -auth-slot 2` |
 | `SPOTIFY_PLAYLIST_ID` | yes | | Target playlist |
 | `GENRES` | no | `Hardstyle` | `any` = the general list, whatever the genre; `all` = every genre separately; or comma-separated: `Hardstyle,Hardcore,Uptempo,Frenchcore,Freestyle,Hard Dance,Hard Techno,UK/Happy Hardcore` |
-| `PAGES` | no | `2`; with `GENRES=any` enough for `MAX_TRACKS` (17) | Pages per genre, 30 tracks per page |
-| `MAX_TRACKS` | no | `500` | Playlist limit |
+| `PAGES` | no | enough for `MAX_TRACKS` from one list (`MAX_TRACKS`/20); `2` for `-compare` | The most pages a run may read of one list. A run reads only as far as the newest `MAX_TRACKS` releases of all lists reach, so this is a safety cap; `-compare` reads this many pages of every list |
+| `HARDTUNES_GENRES` | no | all six: `hardstyle,hardcore,terror,frenchcore,early-rave,hard-techno` | Genre lists of hardtunes.com read by every run and by `-compare`: `https://www.hardtunes.com/<genre>/page/1/`; `none` switches the second source off |
+| `MAX_TRACKS` | no | `500` | The newest this many releases are read and looked up; the playlist holds at most this many tracks |
+| `PLAYLIST_ORDER` | no | `newest` | `newest` (release date, newest first), `oldest` (newest at the end), `artist` or `title`. The newest `MAX_TRACKS` are kept whatever the order |
+| `GENRE_MIN` | no | `0` | Every genre keeps at least its newest this many releases, however busy the other genres are (e.g. `10` keeps Terror and Uptempo in a playlist full of Hardstyle); `0` = only the release date counts |
+| `EVAL_SAMPLES` | no | `5` | Per run, this many releases the ISRC found are also searched by title, so `-evaluate` can measure the title matching against the ISRC's answer. Each costs one or two extra Spotify searches; `0` = off |
 | `CACHE_FILE` | no | `.hardstyle-sync-cache.json` | Cache: matches, dates, missing tracks, playlist, block |
 | `CORRECTIONS_FILE` | no | `corrections.txt` next to the cache | Releases whose Spotify track was refused (see below) |
 | `MAX_SEARCHES` | no | `100` | At most this many Spotify searches per run |
@@ -136,7 +153,7 @@ precedence over the file. `.env` is listed in `.gitignore`.
 | `UI_LANGUAGE` | no | `de` | Language of the UI, the log and the messages: `de` or `en` (also `-lang en`) |
 | `NO_COLOR` | no | | Set to anything (or `TERM=dumb`) and the interface draws as plain text, without color. The layout stays the same |
 | `CONTINUE_DELAY` | no | `10m` | Pause before the next run when releases are still waiting or a run failed |
-| `PLAYLIST_DESCRIPTION` | no | English default text | Playlist description; `{date}`, `{max}` and `{source}` are replaced, `off` leaves the description alone |
+| `PLAYLIST_DESCRIPTION` | no | English default text | Playlist description; `{date}`, `{max}`, `{source}` (the genres) and `{sites}` (hardstyle.com, plus hardtunes.com when it is on) are replaced, `off` leaves the description alone |
 | `DISCORD_WEBHOOK_URL` | no | | Send the summary of a run to this Discord webhook (channel → Edit Channel → Integrations → Webhooks). Empty: nothing is sent |
 | `DATE_TOLERANCE_DAYS` | no | `14` | Allowed difference between the Spotify date and the date on hardstyle.com; a few days are normal (see below) |
 
@@ -148,6 +165,7 @@ go run ./cmd/harderstyles-radar -status       # Spotify apps: blocks, and whethe
 go run ./cmd/harderstyles-radar               # UI, starts a run immediately
 go run ./cmd/harderstyles-radar -no-tui       # text output only, sync once
 go run ./cmd/harderstyles-radar -every 24h    # keep running, once per day
+go run ./cmd/harderstyles-radar -compare      # compare hardstyle.com and hardtunes.com, no Spotify needed
 ```
 
 | Option | |
@@ -160,6 +178,8 @@ go run ./cmd/harderstyles-radar -every 24h    # keep running, once per day
 | `-watch <d>` | Service: check hardstyle.com for new tracks this often, e.g. `15m` (default: `WATCH_INTERVAL`) |
 | `-lang <l>` | Language of the UI and the messages: `de` or `en` |
 | `-no-tui` | Plain log output instead of the interface |
+| `-compare` | Compare the releases of hardstyle.com and hardtunes.com with each other and exit (uses `GENRES`, `HARDTUNES_GENRES`, `PAGES`) |
+| `-evaluate` | Measure the Spotify matching offline on what the cache learned and exit (no Spotify needed, see below) |
 
 Without a terminal (cron, pipe) or with `-no-tui`, only text output is produced.
 
@@ -176,14 +196,18 @@ names the releases to correct. One release per line, `#` starts a comment:
 
 ```
 # <id>  retry                 look it up again
-# <id>  skip  <spotify-uri>   never take this Spotify track
+# <id>  skip   <spotify-uri>  never take this Spotify track
+# <id>  force  <spotify-uri>  take exactly this Spotify track
 1234567  retry
-1234890  skip  spotify:track:abc
+1234890  skip   spotify:track:abc
+1234999  force  spotify:track:def
 ```
 
-The id is the track id on hardstyle.com. `retry` drops the remembered track once and searches again. `skip`
-remembers the Spotify track and never picks it again, then searches for another one. The file is read on every run,
-so it works the same for cron and `-no-tui`. A missing file does nothing.
+The id is the track id on hardstyle.com (the product number on hardtunes.com). `retry` drops the remembered track
+once and searches again. `skip` remembers the Spotify track and never picks it again, then searches for another
+one. `force` takes the given track and never searches the release again — this is how an **uncertain** release (two
+Spotify tracks fit almost equally well, see below) is decided. The file is read on every run, so it works the same
+for cron and `-no-tui`. A missing file does nothing.
 
 In the interface, `r` on the marked release writes a `retry` line and `u` writes a `skip` line for its Spotify
 track. Both start a run straight away. They do nothing while a run is going.
@@ -191,10 +215,10 @@ track. Both start a run straight away. They do nothing while a run is going.
 ## Service mode: check for new tracks every 15 minutes
 
 With `WATCH_INTERVAL=15m` (or `-watch 15m`) the tool runs as a service. The first run is a full one, after that a
-**check** follows every 15 minutes: it reads only the first page of the hardstyle.com list and keeps going until
-a page contains a known track (so an album spread over several pages is picked up too). If there is nothing new,
-**no request at all goes to Spotify**. If there is something new, only those tracks are searched and inserted at
-the top of the playlist. Tracks that were not found are re-checked after 12 hours.
+**check** follows every 15 minutes: it reads each list page by page only until a page contains a known release (so
+an album spread over several pages is picked up too). If there is nothing new, **no request at all goes to
+Spotify**. If there is something new, only those tracks are searched and inserted; the oldest drop out at the end,
+as with any run. Tracks that were not found are re-checked after 12 hours.
 With `-every 24h` there is additionally one full run per day.
 
 In the UI, the “Playlist” box shows the countdown (“in 00:14:32 · new tracks”). Without the UI, service
@@ -209,23 +233,32 @@ To keep it running in the background, wrap the command above in a launchd agent 
 
 ## How the tool finds the tracks on Spotify
 
-For each release the tool works through the following steps and stops at the first hit, to save requests:
+For each release the tool works through the following steps and stops at the first answer, to save requests:
 
-1. **ISRC:** The page of each track on hardstyle.com lists the ISRC, the globally unique code of the recording.
-   Spotify is searched for it exactly, regardless of spelling (one request). Not every track has the same code on
-   Spotify; in that case the tool moves on.
-2. **Title and artist:** Accents and special letters do not matter (`Juliex` is `Juliëx`, `GRIVO` is `GRIVØ`,
-   `Jose` is `José`), neither do spaces or letter case. The artist must be the same or start with the same name.
-   The second line under the title on hardstyle.com (the version, e.g. “Fiesta Mix”) is part of the title; on
-   Spotify the track is called “Title - Fiesta Mix”.
-3. **Date:** hardstyle.com and Spotify often give dates a few days apart for the same release (pre-sale, shop,
-   postponed date). That is why the Spotify date may be off by up to `DATE_TOLERANCE_DAYS` (14) days. If it is
-   further off, it is usually an old version of the same title – unless title and artist match and the difference
-   stays below 45 days: then the track is included anyway and the UI shows “Date differs by N days”. Anything
-   beyond that counts as a different release and is left out.
-4. **Remixes:** If a track has further versions on Spotify in the title (“Title - Some Remix”, “Title (Happy
-   Mix)”) with the same artist and date, they are added to the playlist too (at most 4 per release).
-5. **Albums:** Each track is searched individually. For an album, one track might be found as a single and the next
+1. **ISRC:** The release pages of both sites name the ISRC, the globally unique code of the recording. Spotify is
+   searched for it exactly (one request). Not every track has the same code on Spotify; then the tool moves on.
+2. **Title search, scored:** Spotify is searched for title and artist (a second, fielded search only if the first
+   decides nothing). Every track found gets a score:
+
+   | Evidence | Points |
+   |---|---|
+   | Title with the version of the site / without it / only another version (remix) | +3 / +2 / +0.5 |
+   | Artists: share of the same artists on both sides (order, “&”, “and”, accents do not matter; learned aliases count) | up to +1 |
+   | Length within 5 s / 30 s or more apart (both sites name the length to the second) | +1.5 / −2.5 |
+   | Different remix names / different cuts named (Extended against Radio) | −1 / −1 |
+   | Date within `DATE_TOLERANCE_DAYS` / up to 45 days off / more | 0 / up to −1 / rejected |
+
+   A clean match scores about 4; the best track is taken from 1 point on. The length is what tells an Extended
+   Mix (5:30) from a Radio Edit (3:10) when Spotify's titles do not.
+3. **Uncertain:** When a *different* recording scores almost the same (less than 0.75 points behind) and nothing
+   else prefers the best — a better title, or a length that fits where the other's does not — the tool takes
+   neither: a wrong track in the playlist is worse than a missing one. The release shows as “uncertain” in the UI and
+   in the Discord summary; a `force` line in `corrections.txt` decides it, otherwise it is searched again later.
+4. **Remixes:** Other versions of the song on Spotify (“Title - Some Remix”) with the same artist come along into
+   the playlist (at most 4 tracks per release). They never compete with the release itself.
+5. **Artist aliases:** When the ISRC confirms a match, the tool remembers which Spotify artist each site artist
+   is. An artist the two sides spell differently (“Smurf” and “DJ Smurf”) is then recognised by the Spotify id.
+6. **Albums:** Each track is searched individually. For an album, one track might be found as a single and the next
    one on the album. That is why the tool reads the **catalog number** (e.g. `MINUS288`) from each track's page.
    All tracks of an album share it, even when different artists appear on it. From `ALBUM_MIN_TRACKS` (2) tracks
    with the same number, the tool determines the common Spotify album:
@@ -242,13 +275,29 @@ For each release the tool works through the following steps and stops at the fir
 
 When this procedure improves, the tool re-checks all previously unfound tracks once on its own.
 
-## How the playlist stays like hardstyle.com
+### Measuring the matching: `-evaluate`
 
-- **Order:** The playlist has the same order as the list on hardstyle.com: newest release date first, and for equal
-  dates the order of the page. This is checked on every start and corrected if necessary. The normal case (new tracks
-  on top, old ones dropped at the end) needs only two write requests; a wrong order is rewritten with 1 to 5
-  requests. Tracks that are no longer among the newest releases stay behind them in their order; beyond
-  `MAX_TRACKS` the end is cut off.
+`go run ./cmd/harderstyles-radar -evaluate` measures the title matching offline, without a single request. The
+cache keeps what the title searches found for each release. Matches the ISRC confirmed (`EVAL_SAMPLES` per run
+are also searched by title for this) and `force` corrections are the truth; the matching is replayed on the kept
+searches and counted: correct, wrong, uncertain, missed, and unreachable (the search did not find the true track
+at all). It prints precision and recall, plus the same for a grid of other thresholds, so a change of the weights
+can be judged by numbers instead of by feel. The numbers grow with every run.
+
+## How the playlist stays up to date
+
+- **Which releases:** The newest `MAX_TRACKS` releases of all lists of both sites (with `GENRE_MIN`, every genre's
+  newest come first). The lists are sorted newest first, so the tool merges them by release date and reads only as
+  many pages as that needs. hardstyle.com names the date on the release page (read once, then kept in the cache).
+  hardtunes.com names fresh releases by day and older ones only by week in its list; the tune page names the day,
+  and once known it is kept. A release on both sites (same artists, title and version in any spelling, or the
+  same ISRC) is taken once, from hardstyle.com.
+- **Order:** `PLAYLIST_ORDER`: newest release date first (default; equal dates in the order of the lists), oldest
+  first, by artist or by title. The versions of one release stay together. This is checked on every start and
+  corrected if necessary. With `newest`, the normal case (new tracks on top, old ones dropped at the end) needs
+  only two write requests; other orders and a wrong order are rewritten with 1 to 5 requests. Tracks that are no
+  longer among the newest releases stay as long as there is room, ranked by their release date; beyond
+  `MAX_TRACKS` the oldest drop out.
 - **Date:** For each release the tool reads the release date from its page on hardstyle.com and compares it with
   the Spotify match. A few days of difference are normal and allowed (`DATE_TOLERANCE_DAYS`, default 14); if title
   and artist match and the difference stays below 45 days, the track is included as well and marked “Date differs
@@ -267,7 +316,7 @@ When this procedure improves, the tool re-checks all previously unfound tracks o
 After every successful run (not in a dry run) the tool sets the playlist description, in English, with the source
 and the date of the last update, for example:
 
-> Daily updated. The latest all-genre releases from hardstyle.com, in the same order as on the site (newest first), max. 500 tracks. Last update: 29 Oct 2026
+> Daily updated. The latest all-genre releases from hardstyle.com and hardtunes.com, newest first, max. 500 tracks. Last update: 29 Oct 2026
 
 The text contains the date, so it changes at most once a day, and only then does the tool write it (one request).
 Use `PLAYLIST_DESCRIPTION` for your own text; Spotify accepts at most 300 characters. If setting it fails, this is
@@ -287,12 +336,13 @@ When a message is sent:
 
 - **Full run** — always, also when nothing changed (“Nichts Neues”, with the size of the playlist). This makes the
   optional daily run a small heartbeat.
-- **Check for new tracks** (`WATCH_INTERVAL`) — only when tracks were added or removed, so a quiet service does not
-  post every 15 minutes.
+- **Check for new tracks** (`WATCH_INTERVAL`) — only when tracks were added or removed, or when the warnings of the
+  check differ from the last ones, so a quiet service does not post every 15 minutes and a broken list rings once.
 - **Failed run** — a short message with the error. A cancelled run and a dry run stay quiet.
 
-The message is an embed: the new tracks (up to 10, the rest counted), the counts as fields (new, removed, found on
-Spotify, missing, waiting, Spotify requests), a link to the playlist and the time of the run. The texts follow
+The message is an embed: the new tracks (up to 10, the rest counted), the uncertain releases to decide in
+`corrections.txt`, the warnings of the run, the counts as fields (new, removed, found on Spotify, missing,
+uncertain, waiting, Spotify requests), a link to the playlist and the time of the run. The texts follow
 `UI_LANGUAGE`, so a German UI posts German messages. The webhook address is a secret — anyone with it can post to
 that channel — hence it belongs in `.env` and is kept out of the log, even when Discord cannot be reached. A message
 that cannot be sent is logged; the run itself still counts as successful.
@@ -307,11 +357,24 @@ own, and `x` cancels without restarting.
 
 An error no longer ends the whole run:
 
+- If a page of hardstyle.com or hardtunes.com cannot be read (network error, 5xx, 429), it is tried twice more
+  with a growing pause. A list that still fails is left out of this run with a warning; the run fails only when
+  no list at all can be read.
 - If a search fails, only that release waits for the next run; the others are processed normally. Short network or
   server errors (5xx) are retried twice for read requests; write calls are never retried, so nothing ends up in the
   playlist twice.
 - After 5 failed searches in a row or a Spotify block, only the search stops; whatever was found up to then still
   goes into the playlist.
+
+### Warnings: noticing when a site changed
+
+Scrapers break silently when a site changes its pages. Every run therefore checks what it got and warns, in the
+log and in the Discord summary, when
+
+- a list could not be read, or was empty from its first page on (a genre gone, or new markup);
+- more than a tenth of the releases in the window have no release date;
+- the hardstyle.com lists name no track lengths at all;
+- an album page of hardtunes.com could not be read (its tracks are missing in that run).
 
 ## Going easy on the Spotify API
 
@@ -332,11 +395,8 @@ Under “Requests” in the UI you can see the number of requests of the run.
 ## General list instead of genres
 
 With `GENRES=any` the tool does not query a genre but the general list at `hardstyle.com/en/tracks`, in which all
-genres are mixed. The playlist then gets at most `MAX_TRACKS` (500) tracks in exactly the order of that list.
-`PAGES` is automatically large enough to collect 500 tracks (17 pages). If a track is missing on Spotify, the
-playlist is correspondingly shorter; a larger `PAGES` lets more tracks move up.
-For a single list (`any` or one genre) the order of page 1 is applied 1:1; with several genres the lists are
-merged by release date.
+genres are mixed. It is merged with the hardtunes.com lists like any genre list. If a track is missing on Spotify,
+the playlist is correspondingly shorter.
 
 ## Language
 
@@ -432,6 +492,9 @@ cmd/harderstyles-radar/   Entry point: flags, .env, language and wiring
 internal/config/          Settings from environment and .env
 internal/i18n/            German/English, date and duration texts
 internal/hardstyle/       Reading hardstyle.com (list, detail page, ISRC)
+internal/hardtunes/       Reading hardtunes.com (genre lists of the second source)
+internal/compare/         Comparing the release lists of all sources (-compare)
+internal/eval/            Measuring the Spotify matching offline (-evaluate)
 internal/match/           Comparing title, artist and date
 internal/spotify/         Spotify API, login, searching for a release
 internal/cache/           Cache (matches, dates, playlist, block)
@@ -442,13 +505,13 @@ internal/tui/             UI (bubbletea/lipgloss)
 ```
 
 Packages depend on each other in one direction only: `tui` and `sync` on top, below them `spotify`, `cache`,
-`hardstyle`, `match`, `config`; `i18n` and `event` are available everywhere.
+`hardstyle`, `hardtunes`, `compare`, `eval`, `match`, `config`; `i18n` and `event` are available everywhere.
 
 ## Tests
 
 ```sh
 go test ./...
-HS_LIVE=1 go test -run Live -v ./...   # checks the parser against the real site
+HS_LIVE=1 HT_LIVE=1 go test -run Live -v ./...   # checks the parsers against the real sites
 ```
 
 The screenshots are rendered from the terminal output too, see [`docs/screenshots`](docs/screenshots/).

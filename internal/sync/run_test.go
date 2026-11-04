@@ -54,9 +54,9 @@ func TestPlaylistDescription(t *testing.T) {
 		want string
 	}{
 		{"general list", config.Config{Genres: []string{hardstyle.AnyGenre}, MaxTracks: 500},
-			"Daily updated. The latest all-genre releases from hardstyle.com, in the same order as on the site (newest first), max. 500 tracks. Last update: 29 Oct 2026"},
-		{"one genre", config.Config{Genres: []string{"Hardstyle"}, MaxTracks: 300},
-			"Daily updated. The latest Hardstyle releases from hardstyle.com, in the same order as on the site (newest first), max. 300 tracks. Last update: 29 Oct 2026"},
+			"Daily updated. The latest all-genre releases from hardstyle.com, newest first, max. 500 tracks. Last update: 29 Oct 2026"},
+		{"one genre, both sites, oldest first", config.Config{Genres: []string{"Hardstyle"}, HardtunesGenres: []string{"terror"}, MaxTracks: 300, Order: config.OrderOldest},
+			"Daily updated. The latest Hardstyle releases from hardstyle.com and hardtunes.com, oldest first, max. 300 tracks. Last update: 29 Oct 2026"},
 		{"several genres", config.Config{Genres: []string{"Hardstyle", "Uptempo"}, MaxTracks: 500, Description: "From hardstyle.com: {source}. Updated daily, last on {date} ({max})."},
 			"From hardstyle.com: Hardstyle, Uptempo. Updated daily, last on 29 Oct 2026 (500)."},
 	}

@@ -17,7 +17,7 @@ const (
 	cacheVersion = 2
 	// matcherVersion counts the changes of how releases are matched to Spotify tracks. When it grows, the
 	// releases that were not found are looked for again at once: the better matching may find them now.
-	matcherVersion = 5
+	matcherVersion = 6
 	// detailsVersion counts what is read from the page of a release. When it grows, the pages are read again
 	// once (2: the catalog number).
 	detailsVersion = 2
@@ -47,6 +47,40 @@ type Entry struct {
 	Tries       int       `json:"tries,omitempty"`        // how often it was searched without success
 	Rejected    []string  `json:"rejected,omitempty"`     // Spotify tracks a correction refused; they are never chosen again
 	Forced      string    `json:"forced,omitempty"`       // a Spotify track a correction chose by hand; it wins over the search
+	// ByISRC: the match came from the ISRC, as sure as a match gets. The evaluation takes it as the truth.
+	ByISRC bool `json:"by_isrc,omitempty"`
+	// DateExact: Date is the real day, not an estimate (hardtunes.com names some releases only by week).
+	DateExact bool `json:"date_exact,omitempty"`
+	// Release is the release as the site listed it when it was looked up last, and Searched what the title
+	// searches of Spotify found then: the evaluation replays the matching on them without a request.
+	Release  *StoredRelease `json:"release,omitempty"`
+	Searched []StoredTrack  `json:"searched,omitempty"`
+}
+
+// StoredRelease is a release as the site listed it, kept for the evaluation.
+type StoredRelease struct {
+	Title    string `json:"title"`
+	Version  string `json:"version,omitempty"`
+	Artist   string `json:"artist"`
+	Label    string `json:"label,omitempty"`
+	Duration int    `json:"duration,omitempty"` // seconds
+	Date     string `json:"date,omitempty"`
+	ISRC     string `json:"isrc,omitempty"`
+}
+
+// StoredTrack is a Spotify track a title search found, kept for the evaluation.
+type StoredTrack struct {
+	URI           string   `json:"uri"`
+	Name          string   `json:"name"`
+	Artists       []string `json:"artists"`
+	ArtistIDs     []string `json:"artist_ids,omitempty"`
+	ReleaseDate   string   `json:"release_date,omitempty"`
+	DatePrecision string   `json:"date_precision,omitempty"`
+	Duration      int      `json:"duration,omitempty"` // seconds
+	AlbumID       string   `json:"album_id,omitempty"`
+	AlbumName     string   `json:"album_name,omitempty"`
+	AlbumType     string   `json:"album_type,omitempty"`
+	AlbumTracks   int      `json:"album_tracks,omitempty"`
 }
 
 // DetailsDue tells whether the page of the release on hardstyle.com has to be read (again): it was never read,
@@ -99,6 +133,8 @@ type cacheFile struct {
 	Description  *describedPlaylist    `json:"description,omitempty"`
 	BlockedUntil time.Time             `json:"blocked_until,omitempty"` // before several apps: the block of the only one
 	Blocked      map[string]time.Time  `json:"blocked,omitempty"`       // by client id
+	// Aliases maps a site artist name (match.NormName) to the Spotify artist ids it was confirmed as (by ISRC).
+	Aliases map[string][]string `json:"aliases,omitempty"`
 }
 
 // Cache keeps what the tool learned, so a daily run asks Spotify as little as possible: which release is which
@@ -170,11 +206,15 @@ func (c *Cache) update(t hardstyle.Track, change func(*Entry)) {
 	c.dirty = true
 }
 
-// SetDetails remembers the release date, the ISRC and the catalog number of hardstyle.com. They never change,
-// so they are asked for only once.
+// SetDetails remembers the release date, the ISRC, the catalog number and the length from the release page.
+// They never change, so they are asked for only once. An estimated date (DateApprox) does not replace a day
+// that is known exactly.
 func (c *Cache) SetDetails(t hardstyle.Track, d hardstyle.Details) {
 	c.update(t, func(e *Entry) {
-		e.Date, e.DetailsV = d.Date, detailsVersion
+		e.DetailsV = detailsVersion
+		if !d.DateApprox || !e.DateExact || e.Date == "" {
+			e.Date, e.DateExact = d.Date, !d.DateApprox && d.Date != ""
+		}
 		if d.ISRC != "" {
 			e.ISRC = d.ISRC
 		}
@@ -184,6 +224,66 @@ func (c *Cache) SetDetails(t hardstyle.Track, d hardstyle.Details) {
 	})
 }
 
+// RememberDate keeps a release day the list named exactly ("Today" on hardtunes.com). Later the list may name
+// only the week; the day stays. The release page still counts as unread.
+func (c *Cache) RememberDate(t hardstyle.Track, date string) {
+	if date == "" {
+		return
+	}
+	c.update(t, func(e *Entry) {
+		e.Date, e.DateExact = date, true
+	})
+}
+
+// SetSearched keeps the release as listed and what the title searches found, for the evaluation.
+func (c *Cache) SetSearched(t hardstyle.Track, r StoredRelease, searched []StoredTrack) {
+	c.update(t, func(e *Entry) {
+		e.Release, e.Searched = &r, searched
+	})
+}
+
+// Each calls fn for every release the cache knows, in no particular order.
+func (c *Cache) Each(fn func(e Entry)) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	entries := make([]Entry, 0, len(c.f.Tracks))
+	for _, e := range c.f.Tracks {
+		entries = append(entries, e)
+	}
+	c.mu.Unlock()
+	for _, e := range entries {
+		fn(e)
+	}
+}
+
+// ArtistIDs returns the Spotify artist ids a site artist name (match.NormName) was confirmed as.
+func (c *Cache) ArtistIDs(name string) []string {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.f.Aliases[name]
+}
+
+// LearnArtist remembers that a site artist name (match.NormName) is the Spotify artist id.
+func (c *Cache) LearnArtist(name, id string) {
+	if c == nil || name == "" || id == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if slices.Contains(c.f.Aliases[name], id) {
+		return
+	}
+	if c.f.Aliases == nil {
+		c.f.Aliases = map[string][]string{}
+	}
+	c.f.Aliases[name], c.dirty = append(c.f.Aliases[name], id), true
+}
+
 // Found is the Spotify answer for a release.
 type Found struct {
 	URIs        []string // the best match first, then more versions of the song
@@ -191,6 +291,7 @@ type Found struct {
 	Album       bool   // taken from the Spotify album of its catalog number
 	AlbumID     string // the Spotify album of the best match
 	DaysOff     int    // the date of the match is this many days off
+	ByISRC      bool   // the match came from the ISRC
 }
 
 // SetFound remembers the Spotify tracks of a release. A track a correction refused is left out; if that was
@@ -212,13 +313,13 @@ func (c *Cache) SetFound(t hardstyle.Track, f Found) {
 			uris = kept
 		}
 		if len(uris) == 0 {
-			e.URI, e.Extra = "", nil
+			e.URI, e.Extra, e.ByISRC = "", nil, false
 			e.At, e.Reason = time.Now(), "notfound"
 			return
 		}
 		e.URI, e.Extra = uris[0], append([]string(nil), uris[1:]...)
 		e.At, e.SpotifyDate, e.Reason, e.Tries = time.Now(), f.SpotifyDate, "", 0
-		e.Album, e.AlbumID, e.DaysOff = f.Album, f.AlbumID, f.DaysOff
+		e.Album, e.AlbumID, e.DaysOff, e.ByISRC = f.Album, f.AlbumID, f.DaysOff, f.ByISRC
 	})
 }
 

@@ -81,7 +81,7 @@ var demoGenres = []string{"Hardstyle", "Hardcore", "Uptempo"}
 // shotModel builds a model in the middle of a run, with the events already applied.
 func shotModel() *model {
 	opts := Options{
-		Genres: demoGenres, Pages: 4, MaxTracks: 500, MaxSearches: 100,
+		Genres: demoGenres, MaxTracks: 500, MaxSearches: 100,
 		RequestDelay: 800 * time.Millisecond, ContinueDelay: 10 * time.Minute,
 		Every: 24 * time.Hour, Watch: 15 * time.Minute,
 		Apps: func() []spotify.AppStatus {

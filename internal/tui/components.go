@@ -177,6 +177,8 @@ func statusBadge(s event.Status) string {
 		return theme.Danger.Render(i18n.T("✗ fehlt", "✗ missing"))
 	case event.StatusMismatch:
 		return theme.Warning.Render(i18n.T("✗ Datum", "✗ date"))
+	case event.StatusUncertain:
+		return theme.Warning.Render(i18n.T("? unsicher", "? uncertain"))
 	}
 	return theme.Muted.Render(i18n.T("○ offen", "○ open"))
 }

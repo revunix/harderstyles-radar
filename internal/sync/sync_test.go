@@ -230,6 +230,18 @@ func TestMakePlan(t *testing.T) {
 	}
 }
 
+// named gives every resolved release a track (artist and title), as Sync has them.
+func named(known []resolved, names ...string) []hardstyle.Track {
+	out := make([]hardstyle.Track, len(known))
+	for i := range out {
+		if i < len(names) {
+			a, title, _ := strings.Cut(names[i], " - ")
+			out[i] = hardstyle.Track{Artist: a, Title: title}
+		}
+	}
+	return out
+}
+
 func TestDesiredOrder(t *testing.T) {
 	known := []resolved{
 		{uris: []string{"u1"}, date: "2026-10-27"},
@@ -239,28 +251,62 @@ func TestDesiredOrder(t *testing.T) {
 		{uris: []string{"u4"}}, // date unknown: last of the found
 		{uris: []string{"u2"}, date: "2026-10-29"}, // twice the same track
 	}
-	got := desiredOrder(known, []string{"old1", "u1", "old2"}, nil, 100, false)
+	rel := named(known)
+	got := desiredOrder(known, rel, []string{"old1", "u1", "old2"}, nil, nil, 100, config.OrderNewest)
 	want := []string{"u2", "u2b", "u3", "u1", "u4", "old1", "old2"}
 	if !slices.Equal(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
-	if got := desiredOrder(known, []string{"old1"}, nil, 3, false); !slices.Equal(got, []string{"u2", "u2b", "u3"}) {
+	if got := desiredOrder(known, rel, []string{"old1"}, nil, nil, 3, config.OrderNewest); !slices.Equal(got, []string{"u2", "u2b", "u3"}) {
 		t.Errorf("capped: %v", got)
 	}
 }
 
-func TestOneListKeepsTheOrderOfTheSite(t *testing.T) {
-	// The dates are not in order on purpose: with one list the order of the site wins.
+func TestDatesDecideTheOrderOfOneListToo(t *testing.T) {
+	// The order of the releases is not the order of their dates: the dates win.
 	known := []resolved{
 		{uris: []string{"u1"}, date: "2026-10-20"},
 		{uris: []string{"u2"}, date: "2026-10-29"},
 		{uris: []string{"u3"}, date: "2026-10-25"},
 	}
-	if got := desiredOrder(known, []string{"old"}, nil, 100, true); !slices.Equal(got, []string{"u1", "u2", "u3", "old"}) {
-		t.Errorf("one list: %v", got)
+	if got := desiredOrder(known, named(known), []string{"old"}, nil, nil, 100, config.OrderNewest); !slices.Equal(got, []string{"u2", "u3", "u1", "old"}) {
+		t.Errorf("got %v", got)
 	}
-	if got := desiredOrder(known, []string{"old"}, nil, 100, false); !slices.Equal(got, []string{"u2", "u3", "u1", "old"}) {
-		t.Errorf("several lists: %v", got)
+}
+
+func TestEveryOrderKeepsTheNewestAndOnlyMovesThem(t *testing.T) {
+	known := []resolved{
+		{uris: []string{"zed"}, date: "2026-10-29"},
+		{uris: []string{"abe", "abe-remix"}, date: "2026-10-28"},
+		{uris: []string{"mia"}, date: "2026-10-27"},
+		{uris: []string{"old"}, date: "2026-10-01"}, // the oldest: no room for it
+	}
+	rel := named(known, "Zed - Alpha", "Abe - Omega", "Mia - Beta", "Oz - Gamma")
+	for order, want := range map[config.Order][]string{
+		config.OrderNewest: {"zed", "abe", "abe-remix", "mia"},
+		config.OrderOldest: {"mia", "abe", "abe-remix", "zed"},
+		config.OrderArtist: {"abe", "abe-remix", "mia", "zed"}, // Abe, Mia, Zed
+		config.OrderTitle:  {"zed", "mia", "abe", "abe-remix"}, // Alpha, Beta, Omega
+	} {
+		if got := desiredOrder(known, rel, nil, nil, nil, 4, order); !slices.Equal(got, want) {
+			t.Errorf("%s: got %v, want %v", order, got, want)
+		}
+	}
+}
+
+func TestOldestOrderDropsTheOldestOfThePlaylist(t *testing.T) {
+	// The playlist stands oldest first; a new release comes: the oldest at the top drops out, the new one goes
+	// to the end. The dates of the playlist's tracks are known by URI.
+	known := []resolved{{uris: []string{"new"}, date: "2026-10-30"}}
+	dates := map[string]string{"p1": "2026-10-01", "p2": "2026-10-10", "p3": "2026-10-20"}
+	got := desiredOrder(known, named(known), []string{"p1", "p2", "p3"}, nil, dates, 3, config.OrderOldest)
+	if want := []string{"p2", "p3", "new"}; !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	// The same without known dates: the order of the playlist tells the oldest.
+	got = desiredOrder(known, named(known), []string{"p1", "p2", "p3"}, nil, nil, 3, config.OrderOldest)
+	if want := []string{"p2", "p3", "new"}; !slices.Equal(got, want) {
+		t.Errorf("without dates: got %v, want %v", got, want)
 	}
 }
 
@@ -283,19 +329,9 @@ func TestARefusedTrackDropsOutOfThePlaylist(t *testing.T) {
 		{uris: []string{"other"}, date: "2026-10-28"},
 	}
 	// "refused" is in the playlist now, but a correction refused it, so it must not come back through the tail.
-	got := desiredOrder(known, []string{"kept", "refused"}, []string{"refused"}, 100, true)
+	got := desiredOrder(known, named(known), []string{"kept", "refused"}, []string{"refused"}, nil, 100, config.OrderNewest)
 	if !slices.Equal(got, []string{"kept", "other"}) {
 		t.Errorf("got %v, want the refused track gone", got)
-	}
-
-	f := &fakeSpotify{}
-	sp := newFakeClient(t, f)
-	c, _ := newCache(t)
-	o := opts(map[string]string{"T1": "2026-10-27", "T2": "2026-10-29", "T3": "2026-10-28"})
-	o.KeepSiteOrder = true
-	mustSync(t, sp, site("T1", "T2", "T3"), o, c)
-	if got := f.titles(); !slices.Equal(got, []string{"T1", "T2", "T3"}) {
-		t.Errorf("playlist = %v, want the order of the list", got)
 	}
 }
 
@@ -405,23 +441,6 @@ func TestRateLimitIsRememberedAndNotAskedAgain(t *testing.T) {
 	}
 	if searches, _, snaps, _ := f.state(); searches != 1 || snaps != 1 {
 		t.Errorf("Run asked Spotify during the block: searches=%d snapshot reads=%d", searches, snaps)
-	}
-}
-
-func TestInterleave(t *testing.T) {
-	mk := func(names ...string) (l []hardstyle.Track) {
-		for _, n := range names {
-			l = append(l, hardstyle.Track{Title: n})
-		}
-		return
-	}
-	got := interleave([][]hardstyle.Track{mk("a1", "a2", "a3"), mk("b1"), mk("c1", "c2")})
-	var titles []string
-	for _, g := range got {
-		titles = append(titles, g.Title)
-	}
-	if want := "a1 b1 c1 a2 c2 a3"; strings.Join(titles, " ") != want {
-		t.Errorf("got %v, want %s", titles, want)
 	}
 }
 

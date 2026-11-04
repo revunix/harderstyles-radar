@@ -2,6 +2,7 @@ package match
 
 import (
 	"hardstylesync/internal/hardstyle"
+	"slices"
 	"testing"
 )
 
@@ -142,6 +143,52 @@ func TestDateFits(t *testing.T) {
 	for _, c := range cases {
 		if got, _ := Date(c.site, c.spotify, c.precision, 7); got != c.want {
 			t.Errorf("Date(%q, %q, %q) = %v, want %v", c.site, c.spotify, c.precision, got, c.want)
+		}
+	}
+}
+
+func TestTitleTags(t *testing.T) {
+	cases := []struct {
+		song, title string
+		names       []string
+		format      string
+	}{
+		{"Drugs", "Drugs - Crypsis Remix", []string{"crypsis", "remix"}, ""},
+		{"Drugs", "Drugs (Crypsis Remix) [Extended Mix]", []string{"crypsis", "remix"}, "extended"},
+		{"Song", "Song - Radio Edit", nil, "radio"},
+		{"Song", "Song (Original Mix)", nil, ""},
+		{"Song", "Song (feat. MC Somebody) - Extended Mix", nil, "extended"},
+		{"Song", "Song ft. MC Somebody", nil, ""},
+		{"Gabber I'm G", "Gabber I'm A G", nil, ""},
+		{"Song", "Song - VIP", []string{"vip"}, ""},
+		{"Everything Is Looking Good", "Everything Is Looking Good Fiesta Mix", []string{"fiesta"}, ""},
+	}
+	for _, c := range cases {
+		got := TitleTags(c.song, c.title)
+		if !slices.Equal(got.Names, c.names) || got.Format != c.format {
+			t.Errorf("TitleTags(%q, %q) = %+v, want %v %q", c.song, c.title, got, c.names, c.format)
+		}
+	}
+}
+
+func TestIdentity(t *testing.T) {
+	same := [][2]string{
+		{"Song", "Song - Original Mix"},
+		{"Song - Radio Edit", "Song (Radio Version)"},
+		{"Song (feat. X) - Extended Mix", "Song - Extended Mix"},
+	}
+	for _, p := range same {
+		if Identity(p[0]) != Identity(p[1]) {
+			t.Errorf("%q and %q are the same recording: %q, %q", p[0], p[1], Identity(p[0]), Identity(p[1]))
+		}
+	}
+	other := [][2]string{
+		{"Song - Extended Mix", "Song - Radio Edit"},
+		{"Song", "Song - Crypsis Remix"},
+	}
+	for _, p := range other {
+		if Identity(p[0]) == Identity(p[1]) {
+			t.Errorf("%q and %q are different recordings, both %q", p[0], p[1], Identity(p[0]))
 		}
 	}
 }

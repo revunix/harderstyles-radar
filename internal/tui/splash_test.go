@@ -50,7 +50,7 @@ func TestSplashDrawsTheLogos(t *testing.T) {
 
 // TestSplashFitsAndSkips checks that the intro fills the window and that a key ends it.
 func TestSplashFitsAndSkips(t *testing.T) {
-	m := newModel(context.Background(), Options{Genres: testGenres, Pages: 4, MaxTracks: 500})
+	m := newModel(context.Background(), Options{Genres: testGenres, MaxTracks: 500})
 	m.splash = true
 	for _, size := range [][2]int{{120, 36}, {80, 24}, {40, 12}, {220, 60}} {
 		m.width, m.height = size[0], size[1]

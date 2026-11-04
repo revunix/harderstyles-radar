@@ -39,6 +39,10 @@ type RunSummary struct {
 	Requests   int // Spotify requests of the run
 	// NewTracks are the releases that came into the playlist, in the order of the site.
 	NewTracks []hardstyle.Track
+	// Uncertain are the releases for which two Spotify tracks fit almost equally well (none was taken).
+	Uncertain []hardstyle.Track
+	// Warnings are what looked wrong in the run: a list not readable, a site that may have changed.
+	Warnings []string
 }
 
 // webhook is the body Discord expects. It carries no username, so Discord uses the name the webhook has in the
@@ -105,8 +109,8 @@ func runEmbed(s RunSummary) embed {
 		b.WriteString(fmt.Sprintf(i18n.T("**%d neu**, **%d entfernt** · %d Tracks in der Playlist",
 			"**%d new**, **%d removed** · %d tracks in the playlist"), s.Added, s.Removed, s.After))
 	} else {
-		b.WriteString(fmt.Sprintf(i18n.T("Keine neuen Tracks auf hardstyle.com · %d Tracks in der Playlist",
-			"No new tracks on hardstyle.com · %d tracks in the playlist"), s.After))
+		b.WriteString(fmt.Sprintf(i18n.T("Keine neuen Tracks · %d Tracks in der Playlist",
+			"No new tracks · %d tracks in the playlist"), s.After))
 	}
 	if len(s.NewTracks) > 0 {
 		b.WriteString("\n\n")
@@ -121,6 +125,22 @@ func runEmbed(s RunSummary) embed {
 			b.WriteString("• " + trackLine(t))
 		}
 	}
+	if len(s.Uncertain) > 0 {
+		b.WriteString("\n\n" + i18n.T("**Unsicher** (in corrections.txt festlegen):", "**Uncertain** (decide in corrections.txt):"))
+		for i, t := range s.Uncertain {
+			if i == maxListed {
+				b.WriteString(fmt.Sprintf("\n"+i18n.T("… und %d weitere", "… and %d more"), len(s.Uncertain)-maxListed))
+				break
+			}
+			b.WriteString("\n• " + trackLine(t))
+		}
+	}
+	if len(s.Warnings) > 0 {
+		b.WriteString("\n\n" + i18n.T("⚠️ **Warnungen**", "⚠️ **Warnings**"))
+		for _, w := range s.Warnings {
+			b.WriteString("\n• " + escape(w))
+		}
+	}
 	if e.URL != "" {
 		b.WriteString("\n\n[" + i18n.T("Zur Playlist", "Open playlist") + "](" + e.URL + ")")
 	}
@@ -131,6 +151,7 @@ func runEmbed(s RunSummary) embed {
 		{Name: i18n.T("Entfernt", "Removed"), Value: strconv.Itoa(s.Removed), Inline: true},
 		{Name: i18n.T("Bei Spotify", "On Spotify"), Value: strconv.Itoa(s.Matched), Inline: true},
 		{Name: i18n.T("Fehlen", "Missing"), Value: strconv.Itoa(s.Missing), Inline: true},
+		{Name: i18n.T("Unsicher", "Uncertain"), Value: strconv.Itoa(len(s.Uncertain)), Inline: true},
 		{Name: i18n.T("Warten", "Waiting"), Value: strconv.Itoa(s.Deferred), Inline: true},
 		{Name: i18n.T("Anfragen", "Requests"), Value: strconv.Itoa(s.Requests), Inline: true},
 	}

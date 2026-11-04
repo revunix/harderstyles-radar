@@ -1,10 +1,12 @@
 package sync
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"hardstylesync/internal/cache"
+	"hardstylesync/internal/config"
 	"hardstylesync/internal/event"
 	"hardstylesync/internal/hardstyle"
 	"hardstylesync/internal/i18n"
@@ -22,15 +24,17 @@ type Options struct {
 	MaxSearches   int  // limit of Spotify lookups per run; the rest waits for the next run
 	DateTolerance int  // days the release date on Spotify may differ from hardstyle.com
 	DryRun        bool // plan only, write nothing
-	// KeepSiteOrder keeps the order of the list of hardstyle.com exactly, as it is with one list (the general one
-	// or one genre). With several genres the lists are merged by release date.
-	KeepSiteOrder bool
+	// Order is how the playlist is sorted. Whatever it is, the newest MaxTracks tracks are kept.
+	Order config.Order
 	// FetchDetails reads the release date and the ISRC of a release from its page on hardstyle.com. Without it
 	// neither the date nor the ISRC is used.
 	FetchDetails func(context.Context, hardstyle.Track) (hardstyle.Details, error)
 	// AlbumMinTracks is the number of releases with the same catalog number on the site from which they count as
 	// an album: all its tracks are then taken from the same Spotify album. 0 switches it off.
 	AlbumMinTracks int
+	// EvalSamples is how many releases the ISRC finds in this run are also searched by title, for the
+	// evaluation (see config.Config.EvalSamples).
+	EvalSamples int
 }
 
 type Result struct {
@@ -45,6 +49,11 @@ type Result struct {
 	Unmatched []hardstyle.Track
 	// AddedTracks are the releases that got tracks into the playlist in this run, in the order of the site.
 	AddedTracks []hardstyle.Track
+	// Uncertain are the releases for which two different Spotify tracks fit almost equally well: none was
+	// taken, a correction decides.
+	Uncertain []hardstyle.Track
+	// Warnings are what looked wrong in the run (a list not readable, a site that may have changed).
+	Warnings []string
 }
 
 // resolved is what a run knows about one release.
@@ -108,21 +117,27 @@ func reasonText(reason, spotifyDate, siteDate string) string {
 		}
 		return fmt.Sprintf(i18n.T("Datum weicht ab: Spotify %s, hardstyle.com %s", "Date differs: Spotify %s, hardstyle.com %s"), spotifyDate, siteDate)
 	}
+	if reason == spotify.ReasonUncertain {
+		return i18n.T("unsicher: zwei Spotify-Tracks passen fast gleich gut – in corrections.txt festlegen", "uncertain: two Spotify tracks fit almost equally well – decide in corrections.txt")
+	}
 	return i18n.T("nicht bei Spotify gefunden", "not found on Spotify")
 }
 
 // normalizeReason reads a reason from the cache. Older versions saved the German text.
 func normalizeReason(reason string) string {
-	if reason == spotify.ReasonDate || strings.HasPrefix(reason, "Datum") || strings.HasPrefix(reason, "Date differs") {
+	switch {
+	case reason == spotify.ReasonUncertain:
+		return reason
+	case reason == spotify.ReasonDate || strings.HasPrefix(reason, "Datum") || strings.HasPrefix(reason, "Date differs"):
 		return spotify.ReasonDate
 	}
 	return spotify.ReasonNotFound
 }
 
-// Sync brings the playlist in line with hardstyle.com: the tracks of the latest releases, in the order of the site
-// (newest first), at most MaxTracks, the oldest at the end drop out. To keep the number of Spotify requests small
-// it uses the cache for everything it already knows, looks up at most MaxSearches releases, and changes the
-// playlist with as few requests as possible.
+// Sync brings the playlist in line with the sites: the tracks of the latest releases, at most MaxTracks, sorted
+// as Order says; the oldest drop out. To keep the number of Spotify requests small it uses the cache for
+// everything it already knows, looks up at most MaxSearches releases, and changes the playlist with as few
+// requests as possible.
 func Sync(ctx context.Context, sp *spotify.Client, playlistID string, releases []hardstyle.Track, opt Options, c *cache.Cache, emit event.Emit) (Result, error) {
 	res := Result{Scraped: len(releases)}
 	defer func() {
@@ -155,6 +170,8 @@ func Sync(ctx context.Context, sp *spotify.Client, playlistID string, releases [
 		switch {
 		case r.deferred:
 			res.Deferred++
+		case len(r.uris) == 0 && r.reason == spotify.ReasonUncertain:
+			res.Uncertain = append(res.Uncertain, releases[i])
 		case len(r.uris) == 0:
 			res.Unmatched = append(res.Unmatched, releases[i])
 		default:
@@ -162,7 +179,7 @@ func Sync(ctx context.Context, sp *spotify.Client, playlistID string, releases [
 		}
 	}
 
-	final := desiredOrder(known, current, refusedURIs(releases, c), opt.MaxTracks, opt.KeepSiteOrder)
+	final := desiredOrder(known, releases, current, refusedURIs(releases, c), c.DatesByURI(), opt.MaxTracks, opt.Order)
 	res.After = len(final)
 	finalSet := setOf(final)
 	for _, u := range final {
@@ -272,7 +289,17 @@ func resolveAll(ctx context.Context, sp *spotify.Client, releases []hardstyle.Tr
 		eb, _ := c.Entry(releases[due[b]])
 		return ea.At.Before(eb.At)
 	})
-	todo := append(fresh, due...)
+
+	// A release whose day has not come is not on Spotify yet: it is searched from its day on, and takes no
+	// search of the limit before (when its day is known already).
+	today := time.Now().Format("2006-01-02")
+	todo := slices.DeleteFunc(slices.Concat(fresh, due), func(i int) bool {
+		why, wait := notOutYet(known[i].date, today)
+		if wait {
+			known[i].deferred, known[i].why = true, why
+		}
+		return wait
+	})
 	if len(todo) > opt.MaxSearches {
 		for _, i := range todo[opt.MaxSearches:] {
 			known[i].deferred, known[i].why = true, i18n.T("wartet auf den nächsten Lauf (Suchlimit)", "waits for the next run (search limit)")
@@ -394,6 +421,7 @@ func resolveAll(ctx context.Context, sp *spotify.Client, releases []hardstyle.Tr
 
 	cands := map[int][]spotify.Candidate{}
 	failures := 0
+	samples := opt.EvalSamples
 	for n, i := range todo {
 		tr := releases[i]
 		e, _ := c.Entry(tr)
@@ -409,7 +437,17 @@ func resolveAll(ctx context.Context, sp *spotify.Client, releases []hardstyle.Tr
 				emit.Logf(i18n.T("Seite von %q nicht lesbar (%v), Suche ohne Datum und ISRC", "Page of %q not readable (%v), searching without date and ISRC"), tr.Title, err)
 			}
 		}
-		look, err := sp.FindTrack(ctx, tr, details, opt.DateTolerance)
+		// The page may only now have named the day of the release, and it may not have come yet.
+		if why, wait := notOutYet(known[i].date, today); wait {
+			known[i].deferred, known[i].why = true, why
+			report(i)
+			continue
+		}
+		look, err := sp.FindTrack(ctx, tr, details, spotify.MatchOptions{
+			Tolerance: opt.DateTolerance,
+			ArtistIDs: c.ArtistIDs,
+			Sample:    samples > 0 && details.ISRC != "",
+		})
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
@@ -444,8 +482,24 @@ func resolveAll(ctx context.Context, sp *spotify.Client, releases []hardstyle.Tr
 			}
 		}
 		cands[i] = look.Candidates
+		if look.Sampled {
+			samples--
+		}
+		if len(look.Searched) > 0 {
+			stored := make([]cache.StoredTrack, len(look.Searched))
+			for k, t := range look.Searched {
+				stored[k] = t.Stored()
+			}
+			c.SetSearched(tr, cache.StoredRelease{Title: tr.Title, Version: tr.Version, Artist: tr.Artist, Label: tr.Label,
+				Duration: cmp.Or(details.Duration, tr.Duration), Date: details.Date, ISRC: details.ISRC}, stored)
+		}
 		if len(look.URIs) > 0 {
-			c.SetFound(tr, cache.Found{URIs: look.URIs, SpotifyDate: look.SpotifyDate, AlbumID: albumOf(look), DaysOff: look.DaysOff})
+			c.SetFound(tr, cache.Found{URIs: look.URIs, SpotifyDate: look.SpotifyDate, AlbumID: albumOf(look), DaysOff: look.DaysOff, ByISRC: look.ByISRC})
+			if look.ByISRC {
+				if k := slices.IndexFunc(look.Candidates, func(cd spotify.Candidate) bool { return cd.Track.URI == look.URIs[0] }); k >= 0 {
+					learnArtists(c, tr, look.Candidates[k].Track)
+				}
+			}
 		} else {
 			c.SetMissing(tr, look.Reason, look.SpotifyDate)
 		}
@@ -489,12 +543,56 @@ func statusOf(r resolved, inPlaylist map[string]bool) event.Status {
 		return event.StatusPending
 	case len(r.uris) == 0 && r.reason == spotify.ReasonDate:
 		return event.StatusMismatch
+	case len(r.uris) == 0 && r.reason == spotify.ReasonUncertain:
+		return event.StatusUncertain
 	case len(r.uris) == 0:
 		return event.StatusNotFound
 	case !slices.ContainsFunc(r.uris, func(u string) bool { return !inPlaylist[u] }):
 		return event.StatusInPlaylist
 	}
 	return event.StatusNew
+}
+
+// notOutYet tells a release whose day (yyyy-mm-dd) comes after today, and says so for the screen.
+func notOutYet(date, today string) (why string, wait bool) {
+	if date <= today {
+		return "", false
+	}
+	return fmt.Sprintf(i18n.T("erscheint am %s, wird ab dann gesucht", "comes out on %s, searched from then on"), date), true
+}
+
+// learnArtists remembers which Spotify artist a site artist is, from a match the ISRC confirmed. The artists
+// whose names fit pair up by name; when one site artist and one Spotify artist are left without a pair, they
+// are the same artist under two names ("Smurf" and "DJ Smurf"), and the next search knows it.
+func learnArtists(c *cache.Cache, t hardstyle.Track, sp spotify.Track) {
+	used := map[int]bool{}
+	var siteLeft []string
+	for _, name := range match.SplitArtists(t.Artist) {
+		k := -1
+		for j, a := range sp.Artists {
+			if !used[j] && match.Artists(name, []string{a}) {
+				k = j
+				break
+			}
+		}
+		if k < 0 {
+			siteLeft = append(siteLeft, name)
+			continue
+		}
+		used[k] = true
+		if k < len(sp.ArtistIDs) {
+			c.LearnArtist(name, sp.ArtistIDs[k])
+		}
+	}
+	var spLeft []int
+	for k := range sp.Artists {
+		if !used[k] {
+			spLeft = append(spLeft, k)
+		}
+	}
+	if len(siteLeft) == 1 && len(spLeft) == 1 && spLeft[0] < len(sp.ArtistIDs) {
+		c.LearnArtist(siteLeft[0], sp.ArtistIDs[spLeft[0]])
+	}
 }
 
 // refusedURIs collects the Spotify tracks a correction refused, over all releases of the run.
@@ -515,52 +613,120 @@ func setOf(items []string) map[string]bool {
 	return m
 }
 
-// desiredOrder returns the playlist as it should be: the found tracks in the order of hardstyle.com (newest
-// release date first, then the order of the site's list), then the tracks that are in the playlist but not among
-// the latest releases any more, in the order they have. A track a correction refused is left out, even if it is
-// in the playlist now. At most max tracks; the end drops out.
-func desiredOrder(known []resolved, current, refused []string, limit int, keepSiteOrder bool) []string {
-	type entry struct {
-		uris  []string
-		date  string
-		index int
+// desiredOrder returns the playlist as it should be. First it decides which tracks stay: the newest, at most
+// limit. Those are the found releases, newest release date first (equal dates in the order of the releases),
+// then the tracks that are in the playlist but not among the releases any more, newest first as far as dates
+// knows them (by Spotify URI), else in the order they stand. The oldest drop out. A track a correction refused
+// is left out, even if it is in the playlist now. Then order decides where the kept tracks stand; the tracks of
+// one release (its versions) stay together, and with artist or title the tracks only the playlist knows go
+// last.
+func desiredOrder(known []resolved, releases []hardstyle.Track, current, refused []string, dates map[string]string, limit int, order config.Order) []string {
+	type group struct {
+		uris    []string
+		release *hardstyle.Track // nil for a track that is only in the playlist
 	}
-	var found []entry
-	for i, r := range known {
-		if len(r.uris) > 0 {
-			found = append(found, entry{r.uris, r.date, i})
+	newestFirst := func(x, y string) int { // unknown dates last
+		switch {
+		case x == y:
+			return 0
+		case x == "":
+			return 1
+		case y == "", x > y:
+			return -1
 		}
+		return 1
 	}
-	sort.SliceStable(found, func(a, b int) bool {
-		x, y := found[a], found[b]
-		if !keepSiteOrder && x.date != y.date {
-			return y.date == "" || (x.date != "" && x.date > y.date) // unknown dates last
-		}
-		return x.index < y.index
-	})
-	final := make([]string, 0, len(found)+len(current))
 	seen := map[string]bool{}
 	for _, u := range refused {
 		// Marked as seen before anything is added, so the refused track is neither added nor kept.
 		seen[u] = true
 	}
-	for _, f := range found {
-		for _, u := range f.uris {
+	var found []int
+	for i, r := range known {
+		if len(r.uris) > 0 {
+			found = append(found, i)
+		}
+	}
+	slices.SortStableFunc(found, func(a, b int) int { return newestFirst(known[a].date, known[b].date) })
+	var groups []group
+	for _, i := range found {
+		var uris []string
+		for _, u := range known[i].uris {
 			if !seen[u] {
 				seen[u] = true
-				final = append(final, u)
+				uris = append(uris, u)
 			}
 		}
-	}
-	for _, u := range current {
-		if !seen[u] {
-			final = append(final, u)
+		if len(uris) > 0 {
+			groups = append(groups, group{uris, &releases[i]})
 		}
 	}
-	if len(final) > limit {
-		final = final[:limit]
+	var rest []string
+	for _, u := range current {
+		if !seen[u] {
+			seen[u] = true
+			rest = append(rest, u)
+		}
+	}
+	if order == config.OrderOldest {
+		slices.Reverse(rest) // the playlist stands oldest first: its newest are at the end
+	}
+	slices.SortStableFunc(rest, func(a, b string) int { return newestFirst(dates[a], dates[b]) })
+	for _, u := range rest {
+		groups = append(groups, group{uris: []string{u}})
+	}
+
+	var kept []group
+	for left := limit; left > 0 && len(groups) > 0; groups = groups[1:] {
+		g := groups[0]
+		if len(g.uris) > left {
+			g.uris = g.uris[:left]
+		}
+		left -= len(g.uris)
+		kept = append(kept, g)
+	}
+
+	switch order {
+	case config.OrderOldest:
+		slices.Reverse(kept)
+	case config.OrderArtist, config.OrderTitle:
+		slices.SortStableFunc(kept, func(a, b group) int {
+			switch {
+			case a.release == nil || b.release == nil:
+				return cmpBool(a.release == nil, b.release == nil)
+			case order == config.OrderArtist:
+				return cmpKeys(a.release.Artist, b.release.Artist, a.release.Title, b.release.Title, a.release.Version, b.release.Version)
+			}
+			return cmpKeys(a.release.Title, b.release.Title, a.release.Artist, b.release.Artist, a.release.Version, b.release.Version)
+		})
+	}
+	final := make([]string, 0, limit)
+	for _, g := range kept {
+		final = append(final, g.uris...)
 	}
 	return final
+}
+
+// cmpKeys compares names pair by pair, folded (accents, case, punctuation do not count), the first difference
+// decides.
+func cmpKeys(pairs ...string) int {
+	for i := 0; i+1 < len(pairs); i += 2 {
+		if c := strings.Compare(match.NormName(pairs[i]), match.NormName(pairs[i+1])); c != 0 {
+			return c
+		}
+	}
+	return 0
+}
+
+// cmpBool orders false before true.
+func cmpBool(a, b bool) int {
+	switch {
+	case a == b:
+		return 0
+	case a:
+		return 1
+	}
+	return -1
 }
 
 type planKind int

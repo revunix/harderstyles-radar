@@ -126,10 +126,10 @@ func editDistance(a, b string) int {
 	return prev[len(rb)]
 }
 
-// namesClose tells whether two artist names (already folded) are the same name: equal, equal without the
-// spaces ("Jose Del Barrio" and "JoseDelBarrio"), one the beginning of the other ("Act of Rage" and "Act of Rage
-// Official"), or one letter apart.
-func namesClose(a, b string) bool {
+// NamesClose tells whether two artist names (already normalized with NormName) are the same name: equal, equal
+// without the spaces ("Jose Del Barrio" and "JoseDelBarrio"), one the beginning of the other ("Act of Rage" and
+// "Act of Rage Official"), or one letter apart.
+func NamesClose(a, b string) bool {
 	if a == "" || b == "" {
 		return false
 	}
@@ -157,7 +157,7 @@ func Artists(siteArtist string, spotifyArtists []string) bool {
 	}
 	for _, s := range SplitArtists(siteArtist) {
 		for _, h := range have {
-			if namesClose(s, h) {
+			if NamesClose(s, h) {
 				return true
 			}
 		}
@@ -207,6 +207,83 @@ func Title(site hardstyle.Track, spotifyName string) Kind {
 // Matches reports whether a Spotify track is the release of the site: the title fits and an artist is the same.
 func Matches(site hardstyle.Track, name string, artists []string) bool {
 	return Title(site, name) != None && Artists(site.Artist, artists)
+}
+
+var (
+	// featParts are the guest artists in a title: "Song (feat. MC X)", "Song ft. MC X - Extended Mix". They say
+	// nothing about the version of the song.
+	featParts = []*regexp.Regexp{
+		regexp.MustCompile(`[(\[]\s*(?:feat|ft|featuring|with)\b[^)\]]*[)\]]`),
+		regexp.MustCompile(`\s(?:feat\.?|ft\.?|featuring)\s[^(\[]*?(?:\s-\s|$)`),
+	}
+	// formatWords name the cut of a recording, not another version: "Extended Mix", "Radio Edit", "Original Mix".
+	formatWords = map[string]bool{"original": true, "extended": true, "radio": true, "club": true, "edit": true,
+		"mix": true, "version": true, "cut": true, "remaster": true, "remastered": true}
+	// formats are the format words that tell two cuts of the same song apart.
+	formats = map[string]bool{"extended": true, "radio": true, "club": true}
+	// identityNoise are the words that do not change which recording a title names: "Song - Original Mix" is
+	// "Song", "Song (Radio Version)" is "Song - Radio Edit".
+	identityNoise = map[string]bool{"original": true, "mix": true, "edit": true, "version": true}
+)
+
+// withoutFeat takes the guest artists out of a title, in lower case and without accents.
+func withoutFeat(title string) string {
+	s := strings.ToLower(Fold(title))
+	for _, re := range featParts {
+		s = re.ReplaceAllString(s, " - ")
+	}
+	return s
+}
+
+// Tags are what a title says beyond the song itself.
+type Tags struct {
+	// Names are the words that name another version of the song, sorted: the remixer and "remix" ("crypsis
+	// remix"), "vip", "instrumental", the name of a mix ("fiesta"). Format words are not among them.
+	Names []string
+	// Format is the cut the title names: "extended", "radio", "club", or "" when it names none.
+	Format string
+}
+
+// TitleTags returns what a title (the song and its version: "Drugs - Crypsis Remix", or the title of the site
+// with its version line) says beyond the song, whose title is song. Words of the song are taken out once each,
+// wherever they stand, so "Gabber I'm A G" against "Gabber I'm G" leaves nothing but the article, which goes too.
+func TitleTags(song, title string) Tags {
+	rest := strings.Fields(NormName(withoutFeat(title)))
+	for _, w := range strings.Fields(NormName(song)) {
+		if i := slices.Index(rest, w); i >= 0 {
+			rest = slices.Delete(rest, i, i+1)
+		}
+	}
+	var tags Tags
+	for _, w := range rest {
+		switch {
+		case formats[w] && tags.Format == "":
+			tags.Format = w
+		case formatWords[w] || articles[w]:
+		default:
+			tags.Names = append(tags.Names, w)
+		}
+	}
+	slices.Sort(tags.Names)
+	tags.Names = slices.Compact(tags.Names)
+	return tags
+}
+
+// SameNames tells whether two tags name the same version: both no remix name, or the same words.
+func (t Tags) SameNames(o Tags) bool { return slices.Equal(t.Names, o.Names) }
+
+// Identity is the key of the recording a Spotify title names: the title without guest artists and without the
+// words that do not change the recording. The same recording on a single and on an album has the same key;
+// "Song - Extended Mix" and "Song - Radio Edit" have different ones.
+func Identity(title string) string {
+	words := strings.Fields(NormName(withoutFeat(title)))
+	kept := words[:0]
+	for _, w := range words {
+		if !identityNoise[w] {
+			kept = append(kept, w)
+		}
+	}
+	return strings.Join(dropArticles(kept), " ")
 }
 
 // GraceDays is how far the dates of a track whose title (with its version) and artist fit may be apart and

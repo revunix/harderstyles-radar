@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +26,10 @@ type Track struct {
 	Version string
 	Artist  string
 	Genre   string
+	// Label is the record label as the list names it ("I AM HARDSTYLE"); may be empty.
+	Label string
+	// Duration is the length in seconds as the list names it ("04:41"); 0 when unknown.
+	Duration int
 }
 
 var spaces = regexp.MustCompile(`\s+`)
@@ -41,6 +45,79 @@ var (
 	PageDelay   = time.Second
 	DetailDelay = time.Second
 )
+
+// A request that fails for a passing reason (no connection, a server error, too many requests) is repeated
+// Retries times, after RetryDelay, doubled before every further try. Tests shorten the delay.
+var (
+	Retries    = 2
+	RetryDelay = 2 * time.Second
+)
+
+// maxBody is the most of a page that is read; the pages are far smaller.
+const maxBody = 4 << 20
+
+// StatusError is the answer of a site that is not 200 OK.
+type StatusError struct {
+	URL  string
+	Code int
+}
+
+func (e *StatusError) Error() string { return fmt.Sprintf("%s: HTTP %d", e.URL, e.Code) }
+
+// transient reports whether the answer may be different on the next try: a server error or too many
+// requests. Other answers (404, ...) stay the same.
+func (e *StatusError) transient() bool {
+	return e.Code >= 500 || e.Code == http.StatusTooManyRequests
+}
+
+// Get reads the page at u, at most 4 MiB of it, and returns it with the address it came from after the
+// redirects. An answer other than 200 OK is a *StatusError. A request that fails for a passing reason (a
+// network error, a server error, too many requests) is repeated, see Retries and RetryDelay; when ctx ends,
+// the error is ctx's.
+func Get(ctx context.Context, client *http.Client, u string) ([]byte, *url.URL, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; hardstyle-playlist-sync)")
+	delay := RetryDelay
+	for try := 0; ; try++ {
+		body, final, err := get(client, req)
+		if err == nil {
+			return body, final, nil
+		}
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
+		var status *StatusError
+		if try >= Retries || (errors.As(err, &status) && !status.transient()) {
+			return nil, nil, err
+		}
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		}
+		delay *= 2
+	}
+}
+
+// get makes one try of Get.
+func get(client *http.Client, req *http.Request) ([]byte, *url.URL, error) {
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, &StatusError{URL: req.URL.String(), Code: resp.StatusCode}
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	if err != nil {
+		return nil, nil, err
+	}
+	return body, resp.Request.URL, nil
+}
 
 // AnyGenre asks for the general list of hardstyle.com, whatever the genre.
 const AnyGenre = ""
@@ -61,25 +138,13 @@ func trackListURL(genre string, page int) string {
 	return fmt.Sprintf("%s/en/tracks?genre=%s&page=%d", Base, url.QueryEscape(genre), page)
 }
 
-// fetchPage reads one page of the track list. ErrNoResults means the page is past the last one.
-func fetchPage(ctx context.Context, client *http.Client, genre string, page int) ([]Track, error) {
+// FetchPage reads one page of the track list. ErrNoResults means the page is past the last one.
+// The list at hardstyle.com/en/tracks is sorted by release date, newest first, 30 tracks per page.
+func FetchPage(ctx context.Context, client *http.Client, genre string, page int) ([]Track, error) {
 	u := trackListURL(genre, page)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	body, _, err := Get(ctx, client, u)
 	if err != nil {
 		return nil, err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; hardstyle-playlist-sync)")
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	body, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("hardstyle.com %s: HTTP %d", u, resp.StatusCode)
 	}
 	tracks, err := parseTrackList(string(body), genre)
 	if err != nil && !errors.Is(err, ErrNoResults) {
@@ -88,18 +153,11 @@ func fetchPage(ctx context.Context, client *http.Client, genre string, page int)
 	return tracks, err
 }
 
-// FetchReleases returns the newest tracks of a genre (or of the general list), newest first.
-// The list at hardstyle.com/en/tracks is sorted by release date, 30 tracks per page.
+// FetchReleases returns the newest tracks of a genre (or of the general list), newest first: all of the first
+// pages pages, fewer when the list is shorter.
 func FetchReleases(ctx context.Context, client *http.Client, genre string, pages int) ([]Track, error) {
-	return FetchUntilKnown(ctx, client, genre, pages, nil)
-}
-
-// FetchUntilKnown reads the list page by page and stops after the first page that has a release the caller
-// already knows: everything newer than that has been read then. At most maxPages pages are read. Without
-// known, all maxPages pages are read. One page is all a check for new tracks has to read, most of the time.
-func FetchUntilKnown(ctx context.Context, client *http.Client, genre string, maxPages int, known func(Track) bool) ([]Track, error) {
 	var out []Track
-	for page := 1; page <= maxPages; page++ {
+	for page := 1; page <= pages; page++ {
 		if page > 1 {
 			select {
 			case <-time.After(PageDelay):
@@ -107,7 +165,7 @@ func FetchUntilKnown(ctx context.Context, client *http.Client, genre string, max
 				return nil, ctx.Err()
 			}
 		}
-		tracks, err := fetchPage(ctx, client, genre, page)
+		tracks, err := FetchPage(ctx, client, genre, page)
 		if errors.Is(err, ErrNoResults) {
 			break // small genres have fewer pages than requested
 		}
@@ -115,9 +173,6 @@ func FetchUntilKnown(ctx context.Context, client *http.Client, genre string, max
 			return nil, err
 		}
 		out = append(out, tracks...)
-		if known != nil && slices.ContainsFunc(tracks, known) {
-			break
-		}
 	}
 	return out, nil
 }
@@ -160,9 +215,53 @@ func parseTrackList(page, genre string) ([]Track, error) {
 		if version != nil {
 			v = Clean(text(version))
 		}
-		tracks = append(tracks, Track{ID: attr(n, "data-track-id"), Path: attr(title, "href"), Title: t, Version: v, Artist: a, Genre: genre})
+		// The length and the label: <div class="duration">…<span class="innerDuration">04:41</span></div> and
+		// <div class="label"><a class="link label">I AM HARDSTYLE</a></div>.
+		duration, label := 0, ""
+		if d := find(n, func(n *html.Node) bool { return isElem(n, "span") && hasClass(n, "innerDuration") }); d != nil {
+			duration = parseClock(Clean(text(d)))
+		}
+		if l := find(n, func(n *html.Node) bool { return isElem(n, "div") && hasClass(n, "label") }); l != nil {
+			label = Clean(text(l))
+		}
+		tracks = append(tracks, Track{ID: attr(n, "data-track-id"), Path: attr(title, "href"), Title: t, Version: v, Artist: a,
+			Genre: genre, Label: label, Duration: duration})
 	}
 	return tracks, nil
+}
+
+// parseClock reads a length as the list shows it, "04:41" or "1:02:03", in seconds; 0 when it is no length.
+func parseClock(s string) int {
+	parts := strings.Split(s, ":")
+	if len(parts) < 2 || len(parts) > 3 {
+		return 0
+	}
+	total := 0
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 || (i > 0 && n > 59) {
+			return 0
+		}
+		total = total*60 + n
+	}
+	return total
+}
+
+var isoDuration = regexp.MustCompile(`^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)(?:\.\d+)?S)?$`)
+
+// ParseISODuration reads a length in the ISO 8601 form the pages use in their data ("PT4M41S", "PT04M41S",
+// "PT1H2M3S") in seconds; 0 when it is no such length.
+func ParseISODuration(s string) int {
+	m := isoDuration.FindStringSubmatch(strings.ToUpper(strings.TrimSpace(s)))
+	if m == nil {
+		return 0
+	}
+	total := 0
+	for i, unit := range []int{3600, 60, 1} {
+		n, _ := strconv.Atoi(m[i+1]) // a missing part is 0
+		total += n * unit
+	}
+	return total
 }
 
 // Clean decodes whitespace noise in scraped text.
@@ -226,6 +325,7 @@ var (
 	datePublished = regexp.MustCompile(`"datePublished"\s*:\s*"(\d{4}-\d{2}-\d{2})`)
 	isrcCode      = regexp.MustCompile(`"isrcCode"\s*:\s*"([A-Za-z0-9-]+)"`)
 	catalogNumber = regexp.MustCompile(`"catalogNumber"\s*:\s*"([^"]+)"`)
+	durationLD    = regexp.MustCompile(`"duration"\s*:\s*"([^"]+)"`)
 )
 
 // Details is what the page of a release on hardstyle.com tells besides the list.
@@ -235,6 +335,11 @@ type Details struct {
 	// Catalog is the catalog number of the release the track is part of: all tracks of an album have the same
 	// one ("MINUS288"), whoever the artist. May be empty.
 	Catalog string
+	// Duration is the length in seconds as the release page names it; 0 when unknown.
+	Duration int
+	// DateApprox: Date is an estimate (hardtunes.com names only "This week" or "Last week"). The cache does not
+	// let an estimate replace a day it knows exactly.
+	DateApprox bool
 }
 
 // DetailFetcher reads the release date and the ISRC of a track from its page on hardstyle.com. They never
@@ -265,27 +370,15 @@ func (f *DetailFetcher) Fetch(ctx context.Context, t Track) (Details, error) {
 		return Details{}, ctx.Err()
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, Base+t.Path, nil)
-	if err != nil {
-		return Details{}, err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; hardstyle-playlist-sync)")
-	resp, err := f.hc.Do(req)
-	if err != nil {
-		return Details{}, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return Details{}, fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	body, _, err := Get(ctx, f.hc, Base+t.Path)
 	if err != nil {
 		return Details{}, err
 	}
 	return parseDetails(body)
 }
 
-// parseDetails reads the date, the ISRC and the catalog number from the data of a track page (JSON-LD).
+// parseDetails reads the date, the ISRC, the catalog number and the length from the data of a track page
+// (JSON-LD).
 func parseDetails(page []byte) (Details, error) {
 	m := datePublished.FindSubmatch(page)
 	if m == nil {
@@ -297,6 +390,9 @@ func parseDetails(page []byte) (Details, error) {
 	}
 	if c := catalogNumber.FindSubmatch(page); c != nil {
 		d.Catalog = strings.ToUpper(Clean(string(c[1])))
+	}
+	if l := durationLD.FindSubmatch(page); l != nil {
+		d.Duration = ParseISODuration(string(l[1]))
 	}
 	return d, nil
 }

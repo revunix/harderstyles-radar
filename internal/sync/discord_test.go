@@ -77,7 +77,7 @@ func TestTheRunSummaryGoesToDiscord(t *testing.T) {
 	if e.Title != "Playlist aktualisiert" || !strings.Contains(e.Description, "• A – T1") {
 		t.Errorf("summary = %+v", e)
 	}
-	if len(e.Fields) != 6 || e.Fields[0].Value != "3" {
+	if len(e.Fields) != 7 || e.Fields[0].Value != "3" {
 		t.Errorf("fields = %+v", e.Fields)
 	}
 

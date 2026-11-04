@@ -7,22 +7,23 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
-func init() { PageDelay, DetailDelay = 0, 0 }
+func init() { PageDelay, DetailDelay, RetryDelay = 0, 0, 0 }
 
 func TestParseDetails(t *testing.T) {
-	page := []byte(`<script type="application/ld+json"> { "catalogNumber": " minus288 ", "datePublished": "2026-10-29T00:00:00+01:00", "isrcCode": "nl-g3w-26-00092" } </script>`)
+	page := []byte(`<script type="application/ld+json"> { "catalogNumber": " minus288 ", "duration": "PT04M41S", "datePublished": "2026-10-29T00:00:00+01:00", "isrcCode": "nl-g3w-26-00092" } </script>`)
 	d, err := parseDetails(page)
-	if err != nil || d.Date != "2026-10-29" || d.ISRC != "NLG3W2600092" || d.Catalog != "MINUS288" {
+	if err != nil || d.Date != "2026-10-29" || d.ISRC != "NLG3W2600092" || d.Catalog != "MINUS288" || d.Duration != 281 {
 		t.Errorf("details = %+v err=%v", d, err)
 	}
 	d, err = parseDetails([]byte(`"datePublished": "2026-01-02T00:00:00"`))
-	if err != nil || d.ISRC != "" || d.Catalog != "" {
+	if err != nil || d.ISRC != "" || d.Catalog != "" || d.Duration != 0 {
 		t.Errorf("a page without an ISRC is fine: %+v %v", d, err)
 	}
 	if _, err := parseDetails([]byte("<html></html>")); err == nil {
@@ -30,12 +31,15 @@ func TestParseDetails(t *testing.T) {
 	}
 }
 
+// fixture mirrors the list view of hardstyle.com: the duration and the label follow the track content.
 const fixture = `<html><body><div class="listViewWrapper">
 <div class="track listView big" data-track-id="id-1"><div class="trackContent">
  <span class="hoverMarquee"><a class="linkTitle trackTitle" href="/x" title="Flatline"><span class="innerLink">Flatline</span></a></span>
  <span class="hoverMarquee"><a class="linkTitle" href="/x" title="Extended Mix"> Extended Mix </a></span>
  <span class="artists"><a class="highlight" href="/a"><span class="innerLink">Act of Rage <span class="verified"><i class="icon-check"></i></span></span></a>, Spitnoise and Nolz </span>
-</div></div>
+</div><div class="duration"><i class="icon-track" title="Track"></i><span class="innerDuration">04:41</span></div><div class="label"><a class="link label" href="/en/tracks?label=I AM HARDSTYLE" title="I AM HARDSTYLE">
+                                    I AM HARDSTYLE
+                                    </a></div><div class="options"><span class="innerLabel">Buy</span></div></div>
 <div class="track listView big" data-track-id="id-2"><div class="trackContent">
  <a class="linkTitle trackTitle" href="/y"><span class="innerLink">Drugs (Crypsis Remix)</span></a>
  <span class="artists"><a href="/r"><span class="innerLink">Ran-D</span></a> and <a href="/a"><span class="innerLink">Act of Rage</span></a></span>
@@ -49,7 +53,7 @@ func TestParseTrackList(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []Track{
-		{ID: "id-1", Path: "/x", Title: "Flatline", Version: "Extended Mix", Artist: "Act of Rage, Spitnoise and Nolz", Genre: "Hardstyle"},
+		{ID: "id-1", Path: "/x", Title: "Flatline", Version: "Extended Mix", Artist: "Act of Rage, Spitnoise and Nolz", Genre: "Hardstyle", Label: "I AM HARDSTYLE", Duration: 281},
 		{ID: "id-2", Path: "/y", Title: "Drugs (Crypsis Remix)", Artist: "Ran-D and Act of Rage", Genre: "Hardstyle"},
 	}
 	if len(got) != len(want) {
@@ -59,6 +63,111 @@ func TestParseTrackList(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("track %d = %+v, want %+v", i, got[i], want[i])
 		}
+	}
+}
+
+func TestParseClock(t *testing.T) {
+	for s, want := range map[string]int{
+		"04:41": 281, "0:59": 59, "1:02:03": 3723, "10:00": 600,
+		"": 0, "4": 0, "04:75": 0, "a:bc": 0, "1:2:3:4": 0, "-1:30": 0,
+	} {
+		if got := parseClock(s); got != want {
+			t.Errorf("parseClock(%q) = %d, want %d", s, got, want)
+		}
+	}
+}
+
+func TestParseISODuration(t *testing.T) {
+	for s, want := range map[string]int{
+		"PT4M41S": 281, "PT04M41S": 281, "PT4M6S": 246, "PT1H2M3S": 3723, "PT2H": 7200, "PT45S": 45, "pt3m": 180,
+		"PT3M32.5S": 212, "": 0, "PT": 0, "4:41": 0, "P1DT2H": 0, "PT4M41": 0, "garbage": 0,
+	} {
+		if got := ParseISODuration(s); got != want {
+			t.Errorf("ParseISODuration(%q) = %d, want %d", s, got, want)
+		}
+	}
+}
+
+// flakySite answers the first fail requests with status, then with a page, and counts the requests.
+func flakySite(t *testing.T, fail int, status int) (*httptest.Server, *atomic.Int32) {
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("User-Agent") == "" {
+			t.Error("request without User-Agent")
+		}
+		if int(n.Add(1)) <= fail {
+			w.WriteHeader(status)
+			return
+		}
+		fmt.Fprint(w, "page")
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &n
+}
+
+func TestGetRetries(t *testing.T) {
+	for _, c := range []struct {
+		name         string
+		fail, status int
+		wantOK       bool
+		wantRequests int32
+	}{
+		{"two server errors, then the page", 2, http.StatusServiceUnavailable, true, 3},
+		{"too many requests, then the page", 1, http.StatusTooManyRequests, true, 2},
+		{"server errors beyond the retries", 5, http.StatusInternalServerError, false, 3},
+		{"not found is not repeated", 5, http.StatusNotFound, false, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			srv, n := flakySite(t, c.fail, c.status)
+			body, final, err := Get(context.Background(), srv.Client(), srv.URL+"/p")
+			if c.wantOK && (err != nil || string(body) != "page" || final.Path != "/p") {
+				t.Errorf("got %q %v %v, want the page", body, final, err)
+			}
+			var status *StatusError
+			if !c.wantOK && (!errors.As(err, &status) || status.Code != c.status) {
+				t.Errorf("got %v, want a StatusError with %d", err, c.status)
+			}
+			if n.Load() != c.wantRequests {
+				t.Errorf("%d requests, want %d", n.Load(), c.wantRequests)
+			}
+		})
+	}
+}
+
+func TestGetRetriesNetworkErrors(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	addr := srv.URL
+	srv.Close() // nobody listens any more: every try is a network error
+	var tries atomic.Int32
+	client := &http.Client{Transport: roundTripper(func(r *http.Request) (*http.Response, error) {
+		tries.Add(1)
+		return http.DefaultTransport.RoundTrip(r)
+	})}
+	if _, _, err := Get(context.Background(), client, addr); err == nil {
+		t.Fatal("expected an error")
+	}
+	if tries.Load() != int32(Retries)+1 {
+		t.Errorf("%d tries, want %d", tries.Load(), Retries+1)
+	}
+}
+
+type roundTripper func(*http.Request) (*http.Response, error)
+
+func (f roundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestGetStopsWhenTheContextEndsDuringThePause(t *testing.T) {
+	before := RetryDelay
+	RetryDelay = time.Hour
+	t.Cleanup(func() { RetryDelay = before })
+	srv, n := flakySite(t, 5, http.StatusServiceUnavailable)
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	_, _, err := Get(ctx, srv.Client(), srv.URL)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("got %v, want the context's error", err)
+	}
+	if n.Load() != 1 {
+		t.Errorf("%d requests, want 1", n.Load())
 	}
 }
 
@@ -88,15 +197,33 @@ func TestLiveSite(t *testing.T) {
 		if len(tracks) != 60 {
 			t.Errorf("%s: got %d tracks, want 60", genre, len(tracks))
 		}
+		withDuration, withLabel := 0, 0
+		for _, tr := range tracks {
+			if tr.Duration > 0 {
+				withDuration++
+			}
+			if tr.Label != "" {
+				withLabel++
+			}
+		}
+		t.Logf("%s: %d of %d tracks with a duration, %d with a label", GenreLabel(genre), withDuration, len(tracks), withLabel)
 		for _, tr := range tracks[:3] {
-			t.Logf("%s: %s | %s (%s)", genre, tr.Title, tr.Artist, tr.Path)
+			t.Logf("%s: %s | %s | %s %ds (%s)", genre, tr.Title, tr.Artist, tr.Label, tr.Duration, tr.Path)
 		}
 		if genre == "Hardstyle" {
-			d, err := NewDetailFetcher(http.DefaultClient, 0).Fetch(context.Background(), tracks[0])
-			if err != nil || d.Date == "" {
-				t.Fatalf("details of %q: %+v %v", tracks[0].Title, d, err)
+			f := NewDetailFetcher(http.DefaultClient, time.Second)
+			withDuration := 0
+			for _, tr := range tracks[:5] {
+				d, err := f.Fetch(context.Background(), tr)
+				if err != nil || d.Date == "" {
+					t.Fatalf("details of %q: %+v %v", tr.Title, d, err)
+				}
+				if d.Duration > 0 {
+					withDuration++
+				}
+				t.Logf("details of %q: %+v (list: %ds)", tr.Title, d, tr.Duration)
 			}
-			t.Logf("details of %q: %+v", tracks[0].Title, d)
+			t.Logf("release pages: %d of 5 with a duration", withDuration)
 		}
 	}
 }
@@ -159,37 +286,19 @@ func (s *listOnlySite) start(t *testing.T) *httptest.Server {
 	return srv
 }
 
-func boolInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
-}
-
-func TestFetchUntilKnownStopsAtTheFirstKnownPage(t *testing.T) {
+func TestFetchReleasesReadsAtMostPagesAndStopsAtTheEnd(t *testing.T) {
 	site := &listOnlySite{pages: 3}
 	srv := site.start(t)
-	known := func(ids ...string) func(Track) bool {
-		return func(t Track) bool { return slices.Contains(ids, t.ID) }
-	}
 	for _, c := range []struct {
-		name                  string
-		known                 func(Track) bool
-		wantTracks, wantPages int
+		pages, wantTracks, wantRequests int
 	}{
-		{"known on the first page", known("id2"), 3, 1},
-		{"known on the second page", known("id5"), 6, 2},
-		{"nothing known: all pages the setting allows", known(), 9, 3},
-		{"nil: all pages", nil, 9, 3},
+		{2, 6, 2}, // the setting ends it
+		{5, 9, 4}, // the list ends it: three pages and the one past the end
 	} {
 		site.hits = nil
-		got, err := FetchUntilKnown(context.Background(), srv.Client(), AnyGenre, 5, c.known)
-		if err != nil || len(got) != c.wantTracks || site.count("list") != c.wantPages+boolInt(c.wantPages == 3) {
-			t.Errorf("%s: %d tracks, %d list requests (err %v), want %d tracks and %d pages", c.name, len(got), site.count("list"), err, c.wantTracks, c.wantPages)
+		got, err := FetchReleases(context.Background(), srv.Client(), AnyGenre, c.pages)
+		if err != nil || len(got) != c.wantTracks || site.count("list") != c.wantRequests {
+			t.Errorf("pages=%d: %d tracks, %d requests (err %v), want %d and %d", c.pages, len(got), site.count("list"), err, c.wantTracks, c.wantRequests)
 		}
-	}
-	site.hits = nil
-	if got, _ := FetchUntilKnown(context.Background(), srv.Client(), AnyGenre, 2, nil); len(got) != 6 {
-		t.Errorf("max 2 pages: %d tracks", len(got))
 	}
 }

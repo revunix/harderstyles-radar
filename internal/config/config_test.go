@@ -2,6 +2,7 @@ package config
 
 import (
 	"hardstylesync/internal/hardstyle"
+	"hardstylesync/internal/hardtunes"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,12 +16,12 @@ func TestGeneralListSetting(t *testing.T) {
 		want   []string
 		pages  int
 	}{
-		{"any", []string{hardstyle.AnyGenre}, 17}, // 500 tracks at 30 per page
-		{"ANY", []string{hardstyle.AnyGenre}, 17},
-		{"*", []string{hardstyle.AnyGenre}, 17},
-		{"Hardstyle", []string{"Hardstyle"}, 2},
-		{"Hardstyle, Uptempo", []string{"Hardstyle", "Uptempo"}, 2},
-		{"any, Hardstyle", []string{hardstyle.AnyGenre}, 17}, // the general list already has them all
+		{"any", []string{hardstyle.AnyGenre}, 25}, // 500 tracks at 20 per page: the most one list may need
+		{"ANY", []string{hardstyle.AnyGenre}, 25},
+		{"*", []string{hardstyle.AnyGenre}, 25},
+		{"Hardstyle", []string{"Hardstyle"}, 25},
+		{"Hardstyle, Uptempo", []string{"Hardstyle", "Uptempo"}, 25},
+		{"any, Hardstyle", []string{hardstyle.AnyGenre}, 25}, // the general list already has them all
 	} {
 		t.Setenv("GENRES", c.genres)
 		t.Setenv("PAGES", "")
@@ -38,6 +39,56 @@ func TestGeneralListSetting(t *testing.T) {
 	t.Setenv("PAGES", "5")
 	if cfg, _ := Load(false); cfg.Pages != 5 {
 		t.Errorf("PAGES must win, got %d", cfg.Pages)
+	}
+}
+
+func TestPagesFollowMaxTracksAndCompareLooksShort(t *testing.T) {
+	t.Setenv("SPOTIFY_CLIENT_ID", "x")
+	t.Setenv("SPOTIFY_CLIENT_SECRET", "x")
+	t.Setenv("PAGES", "")
+	t.Setenv("MAX_TRACKS", "300")
+	if cfg, err := Load(false); err != nil || cfg.Pages != 15 {
+		t.Errorf("MAX_TRACKS=300: pages=%d err=%v, want 15", cfg.Pages, err)
+	}
+	if cfg, err := LoadCompare(); err != nil || cfg.Pages != 2 {
+		t.Errorf("-compare: pages=%d err=%v, want 2", cfg.Pages, err)
+	}
+}
+
+func TestAllGenresAreTheGenresOnly(t *testing.T) {
+	t.Setenv("SPOTIFY_CLIENT_ID", "x")
+	t.Setenv("SPOTIFY_CLIENT_SECRET", "x")
+	t.Setenv("GENRES", "all")
+	if cfg, _ := Load(false); !slices.Equal(cfg.Genres, allGenres) {
+		t.Errorf("GENRES=all: %q, want the genres without a genre named all", cfg.Genres)
+	}
+}
+
+func TestGenreMinAndEvalSamples(t *testing.T) {
+	t.Setenv("SPOTIFY_CLIENT_ID", "x")
+	t.Setenv("SPOTIFY_CLIENT_SECRET", "x")
+	if cfg, err := Load(false); err != nil || cfg.GenreMin != 0 || cfg.EvalSamples != 5 {
+		t.Errorf("defaults: GenreMin=%d EvalSamples=%d err=%v", cfg.GenreMin, cfg.EvalSamples, err)
+	}
+	t.Setenv("GENRE_MIN", "-1")
+	if _, err := Load(false); err == nil {
+		t.Error("a negative GENRE_MIN must be reported")
+	}
+}
+
+func TestPlaylistOrder(t *testing.T) {
+	t.Setenv("SPOTIFY_CLIENT_ID", "x")
+	t.Setenv("SPOTIFY_CLIENT_SECRET", "x")
+	if cfg, err := Load(false); err != nil || cfg.Order != OrderNewest {
+		t.Errorf("default: %q, %v", cfg.Order, err)
+	}
+	t.Setenv("PLAYLIST_ORDER", " Oldest ")
+	if cfg, err := Load(false); err != nil || cfg.Order != OrderOldest {
+		t.Errorf("Oldest: %q, %v", cfg.Order, err)
+	}
+	t.Setenv("PLAYLIST_ORDER", "random")
+	if _, err := Load(false); err == nil || !strings.Contains(err.Error(), "PLAYLIST_ORDER") {
+		t.Errorf("an unknown order must be reported, err = %v", err)
 	}
 }
 
@@ -117,5 +168,32 @@ func TestFallbackApps(t *testing.T) {
 	}
 	if _, err = Load(false); err != nil {
 		t.Errorf("-auth does not need the refresh token yet: %v", err)
+	}
+}
+
+func TestHardtunesGenres(t *testing.T) {
+	t.Setenv("SPOTIFY_CLIENT_ID", "x")
+	t.Setenv("SPOTIFY_CLIENT_SECRET", "x")
+	cfg, err := Load(false)
+	if err != nil || !slices.Equal(cfg.HardtunesGenres, hardtunes.Genres) {
+		t.Errorf("default = all six hardtunes genres, got %v, err = %v", cfg.HardtunesGenres, err)
+	}
+	t.Setenv("HARDTUNES_GENRES", "hardstyle, terror")
+	if cfg, err = Load(false); err != nil || !slices.Equal(cfg.HardtunesGenres, []string{"hardstyle", "terror"}) {
+		t.Errorf("HARDTUNES_GENRES must win, got %v, err = %v", cfg.HardtunesGenres, err)
+	}
+	t.Setenv("HARDTUNES_GENRES", "none")
+	if cfg, err = Load(false); err != nil || len(cfg.HardtunesGenres) != 0 {
+		t.Errorf("none switches hardtunes.com off, got %v, err = %v", cfg.HardtunesGenres, err)
+	}
+}
+
+func TestLoadCompareNeedsNoSpotify(t *testing.T) {
+	cfg, err := LoadCompare()
+	if err != nil {
+		t.Fatalf("compare needs no credentials: %v", err)
+	}
+	if len(cfg.HardtunesGenres) != 6 || len(cfg.Genres) != 1 || cfg.Pages < 1 {
+		t.Errorf("sources and pages expected: %+v", cfg)
 	}
 }

@@ -51,6 +51,9 @@ type Track struct {
 	ReleaseDate   string // "2026-10-29", "2026-10" or "2026", see DatePrecision
 	DatePrecision string // "day", "month" or "year"
 	Album         Album  // the release the track is on
+	Duration      int    // length in seconds (duration_ms / 1000); 0 when the answer has none
+	// ArtistIDs are the Spotify ids of Artists, in the same order; an id may be "" when the answer has none.
+	ArtistIDs []string
 }
 
 // Album is the release a track is on: a single, an EP or an album.
@@ -418,17 +421,33 @@ func (s *Client) retry(ctx context.Context, method string, tries *int, why strin
 	}
 }
 
+// searchArtist is an artist as the answers of Spotify name it.
+type searchArtist struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// seconds turns the length of a track in milliseconds into whole seconds, rounded.
+func seconds(ms int) int { return (ms + 500) / 1000 }
+
+// setArtists fills in the names and the ids of the artists of a track.
+func (t *Track) setArtists(as []searchArtist) {
+	for _, a := range as {
+		t.Artists = append(t.Artists, a.Name)
+		t.ArtistIDs = append(t.ArtistIDs, a.ID)
+	}
+}
+
 // Search looks up tracks. Since Feb 2026 the maximum limit is 10.
 func (s *Client) Search(ctx context.Context, q string) ([]Track, error) {
 	var res struct {
 		Tracks struct {
 			Items []struct {
-				URI     string `json:"uri"`
-				Name    string `json:"name"`
-				Artists []struct {
-					Name string `json:"name"`
-				} `json:"artists"`
-				Album struct {
+				URI        string         `json:"uri"`
+				Name       string         `json:"name"`
+				DurationMS int            `json:"duration_ms"`
+				Artists    []searchArtist `json:"artists"`
+				Album      struct {
 					ID          string `json:"id"`
 					Name        string `json:"name"`
 					Type        string `json:"album_type"`
@@ -446,27 +465,25 @@ func (s *Client) Search(ctx context.Context, q string) ([]Track, error) {
 	var out []Track
 	for _, it := range res.Tracks.Items {
 		t := Track{URI: it.URI, Name: it.Name, ReleaseDate: it.Album.ReleaseDate, DatePrecision: it.Album.Precision,
-			Album: Album{ID: it.Album.ID, Name: it.Album.Name, Type: it.Album.Type, Tracks: it.Album.TotalTracks}}
-		for _, a := range it.Artists {
-			t.Artists = append(t.Artists, a.Name)
-		}
+			Album:    Album{ID: it.Album.ID, Name: it.Album.Name, Type: it.Album.Type, Tracks: it.Album.TotalTracks},
+			Duration: seconds(it.DurationMS)}
+		t.setArtists(it.Artists)
 		out = append(out, t)
 	}
 	return out, nil
 }
 
-// AlbumTracks returns the tracks of an album, in order. Only the URI, the name and the artists are filled in;
-// the album and its date are the caller's.
+// AlbumTracks returns the tracks of an album, in order. Only the URI, the name, the length and the artists are
+// filled in; the album and its date are the caller's.
 func (s *Client) AlbumTracks(ctx context.Context, albumID string) ([]Track, error) {
 	var out []Track
 	for offset := 0; ; offset += 50 {
 		var page struct {
 			Items []struct {
-				URI     string `json:"uri"`
-				Name    string `json:"name"`
-				Artists []struct {
-					Name string `json:"name"`
-				} `json:"artists"`
+				URI        string         `json:"uri"`
+				Name       string         `json:"name"`
+				DurationMS int            `json:"duration_ms"`
+				Artists    []searchArtist `json:"artists"`
 			} `json:"items"`
 			Next string `json:"next"`
 		}
@@ -475,10 +492,8 @@ func (s *Client) AlbumTracks(ctx context.Context, albumID string) ([]Track, erro
 			return nil, err
 		}
 		for _, it := range page.Items {
-			t := Track{URI: it.URI, Name: it.Name}
-			for _, a := range it.Artists {
-				t.Artists = append(t.Artists, a.Name)
-			}
+			t := Track{URI: it.URI, Name: it.Name, Duration: seconds(it.DurationMS)}
+			t.setArtists(it.Artists)
 			out = append(out, t)
 		}
 		if page.Next == "" || len(page.Items) == 0 {

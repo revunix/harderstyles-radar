@@ -7,7 +7,6 @@ import (
 	"hardstylesync/internal/match"
 	"net/http"
 	"net/url"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,7 +18,24 @@ import (
 const (
 	ReasonNotFound = "notfound"
 	ReasonDate     = "date" // a track of that name exists, but with another release date
+	// ReasonUncertain: two different tracks fit almost equally well. None is taken; a correction decides
+	// (corrections.txt), and the release is looked up again when it is due, like a missing one.
+	ReasonUncertain = "uncertain"
 )
+
+// MatchOptions steer the matching of a release.
+type MatchOptions struct {
+	Tolerance int // DATE_TOLERANCE_DAYS
+	// ArtistIDs returns the Spotify artist ids learned for a site artist name (match.NormName of one name of
+	// match.SplitArtists); nil when none is known. nil func: no aliases.
+	ArtistIDs func(name string) []string
+	// Sample asks for the title search even when the ISRC finds the track: its answer goes into
+	// Lookup.Searched, so the evaluation can check the title matching against the ISRC's answer.
+	Sample bool
+	// MinScore is the score the best track needs (see Score); MinMargin how far it must be ahead of a different
+	// recording. 0 takes DefaultMinScore and DefaultMinMargin; the evaluation tries other values.
+	MinScore, MinMargin float64
+}
 
 // maxVersions is the largest number of Spotify tracks (versions of one song) a release brings into the playlist.
 const maxVersions = 4
@@ -29,31 +45,40 @@ type Lookup struct {
 	URIs        []string // the best match first, then other versions (remixes) of the song; empty if there is none
 	SpotifyDate string   // the release date of the best match; with ReasonDate that of the track that was too far off
 	DaysOff     int      // the best match fits in title and artist, but its date is this many days off
-	Reason      string   // why there is no match: ReasonNotFound or ReasonDate
+	Reason      string   // why there is no match: ReasonNotFound, ReasonDate or ReasonUncertain
 	// Candidates are all tracks the searches found whose title and artist fit, whatever their date: the tracks
 	// of the release on a single and on an album. The caller tells from them which album a group of releases
 	// has in common.
 	Candidates []Candidate
+	// Searched are the tracks the title searches found (not the ISRC search), best score first, at most
+	// maxSearched. The cache keeps them, so the evaluation can replay the matching offline (Decide).
+	Searched []Track
+	// Sampled: the ISRC found the track and the title search ran as well, only for Searched (MatchOptions.Sample).
+	Sampled bool
+	// ByISRC: the URIs come from the ISRC search, as sure as a match gets.
+	ByISRC bool
 }
 
 // Candidate is a Spotify track whose title and artist fit a release.
 type Candidate struct {
 	Track Track
 	Kind  match.Kind
-	Diff  int // days between the dates
+	Diff  int     // days between the dates
+	Score float64 // how well it fits, higher is better; see Score
 }
 
 // FindTrack returns the Spotify tracks of a release. It tries, as long as nothing is found:
 //
 //  1. the ISRC from the page on hardstyle.com, which names exactly one recording;
-//  2. the title and the artist: the same title (with the version line of the site), an artist that is the same
-//     (accents and special letters do not matter: Juliëx is Juliex), and a release date within tolerance days of
-//     the date on hardstyle.com. A track whose title and artist fit is taken even if its date is up to
+//  2. the title and the artist, scored by Decide: the same title (with the version line of the site), an artist
+//     that is the same (accents and special letters do not matter: Juliëx is Juliex), the length, and a release
+//     date near the date on hardstyle.com. A track whose title and artist fit is taken even if its date is up to
 //     match.GraceDays off: the two sites often name different days for the same release. It is marked as such.
 //     Remixes ("Song - Some Remix") of the same song come along.
 //
-// Each search is one request; a hit in the first one ends the lookup.
-func (s *Client) FindTrack(ctx context.Context, t hardstyle.Track, d hardstyle.Details, tolerance int) (Lookup, error) {
+// Each search is one request; a hit in the first one ends the lookup. With o.Sample the title searches run
+// after a hit of the ISRC as well, for Lookup.Searched only.
+func (s *Client) FindTrack(ctx context.Context, t hardstyle.Track, d hardstyle.Details, o MatchOptions) (Lookup, error) {
 	if d.ISRC != "" {
 		found, err := s.Search(ctx, "isrc:"+d.ISRC)
 		if err != nil {
@@ -62,79 +87,44 @@ func (s *Client) FindTrack(ctx context.Context, t hardstyle.Track, d hardstyle.D
 		if look := byISRC(found, d.Date); len(look.URIs) > 0 {
 			for _, f := range found {
 				_, diff := match.Date(d.Date, f.ReleaseDate, f.DatePrecision, 0)
-				look.Candidates = append(look.Candidates, Candidate{f, match.Exact, diff})
+				look.Candidates = append(look.Candidates, Candidate{Track: f, Kind: match.Exact, Diff: diff})
 			}
+			look.ByISRC = true
+			if !o.Sample {
+				return look, nil
+			}
+			byTitle, err := s.findByTitle(ctx, t, d, o)
+			if err != nil {
+				return Lookup{}, err
+			}
+			look.Searched, look.Sampled = byTitle.Searched, true
 			return look, nil
 		}
 	}
+	return s.findByTitle(ctx, t, d, o)
+}
 
+// findByTitle searches for the title and the artist of a release. The second query runs only when Decide does
+// not take a track from the first; Decide always sees all that both found.
+func (s *Client) findByTitle(ctx context.Context, t hardstyle.Track, d hardstyle.Details, o MatchOptions) (Lookup, error) {
 	queries := []string{t.Title + " " + match.SearchArtists(t.Artist)}
 	if first := match.SplitArtists(t.Artist); len(first) > 0 {
 		// Fielded query second, it is more precise for generic titles.
 		queries = append(queries, fmt.Sprintf("track:%s artist:%s", t.Title, first[0]))
 	}
-	var older, all []Candidate
+	var found []Track
+	var look Lookup
 	for _, q := range queries {
-		found, err := s.Search(ctx, q)
+		res, err := s.Search(ctx, q)
 		if err != nil {
 			return Lookup{}, err
 		}
-		var good []Candidate
-		for _, f := range found {
-			kind := match.Title(t, f.Name)
-			if kind == match.None || !match.Artists(t.Artist, f.Artists) {
-				continue
-			}
-			ok, diff := match.Date(d.Date, f.ReleaseDate, f.DatePrecision, tolerance)
-			if !slices.ContainsFunc(all, func(c Candidate) bool { return c.Track.URI == f.URI }) {
-				all = append(all, Candidate{f, kind, diff})
-			}
-			switch {
-			case ok:
-				good = append(good, Candidate{f, kind, diff})
-			case diff > tolerance && diff <= match.GraceDays:
-				// Title and artist fit, only the date is off: the same release whose date the two sites do not
-				// name the same. It is taken and marked (DaysOff).
-				good = append(good, Candidate{f, kind, diff})
-			case kind != match.Version:
-				older = append(older, Candidate{f, kind, diff})
-			}
-		}
-		if len(good) > 0 {
-			look := lookupOf(good, tolerance)
-			look.Candidates = all
-			return look, nil
+		found = append(found, res...)
+		if look = Decide(t, d, found, o); len(look.URIs) > 0 {
+			break
 		}
 	}
-	if len(older) > 0 {
-		sort.SliceStable(older, func(i, j int) bool { return older[i].Diff < older[j].Diff })
-		return Lookup{Reason: ReasonDate, SpotifyDate: older[0].Track.ReleaseDate, Candidates: all}, nil
-	}
-	return Lookup{Reason: ReasonNotFound, Candidates: all}, nil
-}
-
-// lookupOf turns the candidates into the answer: the exact title first, then the other versions, the nearest
-// release date first within each. A best match whose date is farther off than the tolerance is marked with the
-// days it is off.
-func lookupOf(good []Candidate, tolerance int) Lookup {
-	sort.SliceStable(good, func(i, j int) bool {
-		if good[i].Kind != good[j].Kind {
-			return good[i].Kind < good[j].Kind
-		}
-		return good[i].Diff < good[j].Diff
-	})
-	look := Lookup{SpotifyDate: good[0].Track.ReleaseDate}
-	if good[0].Diff > tolerance {
-		look.DaysOff = good[0].Diff
-	}
-	seen := map[string]bool{}
-	for _, c := range good {
-		if !seen[c.Track.URI] && len(look.URIs) < maxVersions {
-			seen[c.Track.URI] = true
-			look.URIs = append(look.URIs, c.Track.URI)
-		}
-	}
-	return look
+	return look, nil
 }
 
 // byISRC takes the answer of a search for an ISRC: the tracks have that recording. The same recording can be on

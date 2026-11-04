@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -9,12 +10,15 @@ import (
 	"hardstylesync/internal/corrections"
 	"hardstylesync/internal/event"
 	"hardstylesync/internal/hardstyle"
+	"hardstylesync/internal/hardtunes"
 	"hardstylesync/internal/i18n"
 	"hardstylesync/internal/notify"
 	"hardstylesync/internal/spotify"
 	"log"
 	"net/http"
+	"slices"
 	"strings"
+	gosync "sync"
 	"time"
 )
 
@@ -25,8 +29,9 @@ func Run(ctx context.Context, hc *http.Client, sp *spotify.Client, cfg config.Co
 	return res, err
 }
 
-// notifyRun sends the summary to Discord. A check for new tracks that found nothing stays quiet, a full run always
-// reports, a failed run reports its error. A failed message is only logged: the run itself was fine.
+// notifyRun sends the summary to Discord. A check for new tracks that found nothing stays quiet, unless its
+// warnings differ from the last ones reported; a full run always reports, a failed run reports its error. A
+// failed message is only logged: the run itself was fine.
 func notifyRun(ctx context.Context, hc *http.Client, cfg config.Config, res Result, err error, dryRun, quick bool, sp *spotify.Client, emit event.Emit) {
 	if cfg.DiscordWebhook == "" || dryRun {
 		return
@@ -39,7 +44,7 @@ func notifyRun(ctx context.Context, hc *http.Client, cfg config.Config, res Resu
 			return
 		}
 		nerr = notify.SendFailure(ctx, hc, cfg.DiscordWebhook, now, err)
-	case quick && res.Added == 0 && res.Removed == 0:
+	case quick && res.Added == 0 && res.Removed == 0 && !warningsChanged(res.Warnings):
 		return
 	default:
 		nerr = notify.SendRun(ctx, hc, cfg.DiscordWebhook, notify.RunSummary{
@@ -53,11 +58,35 @@ func notifyRun(ctx context.Context, hc *http.Client, cfg config.Config, res Resu
 			Deferred:   res.Deferred,
 			Requests:   sp.Requests(),
 			NewTracks:  res.AddedTracks,
+			Uncertain:  res.Uncertain,
+			Warnings:   res.Warnings,
 		})
+	}
+	if err == nil {
+		rememberWarnings(res.Warnings)
 	}
 	if nerr != nil {
 		emit.Logf(i18n.T("Discord-Nachricht nicht gesendet: %v", "Discord message not sent: %v"), nerr)
 	}
+}
+
+// lastWarnings are the warnings of the last run of this process, so a broken list does not ring every few
+// minutes: a quiet check reports only when its warnings changed.
+var (
+	warningsMu   gosync.Mutex
+	lastWarnings []string
+)
+
+func warningsChanged(w []string) bool {
+	warningsMu.Lock()
+	defer warningsMu.Unlock()
+	return !slices.Equal(w, lastWarnings)
+}
+
+func rememberWarnings(w []string) {
+	warningsMu.Lock()
+	defer warningsMu.Unlock()
+	lastWarnings = slices.Clone(w)
 }
 
 // run does one run: read the releases from hardstyle.com and bring the playlist up to date.
@@ -100,52 +129,49 @@ func run(ctx context.Context, hc *http.Client, sp *spotify.Client, cfg config.Co
 		_ = c.Save()
 	}
 
-	var perGenre [][]hardstyle.Track
-	for i, genre := range cfg.Genres {
-		emit.Send(event.Event{Kind: event.EvPhase, Phase: event.PhaseFetch, Done: i, Total: len(cfg.Genres), Msg: genre})
-		var tracks []hardstyle.Track
-		var err error
-		if quick {
-			tracks, err = hardstyle.FetchUntilKnown(ctx, hc, genre, cfg.Pages, func(t hardstyle.Track) bool {
-				e, ok := c.Entry(t)
-				return ok && !e.At.IsZero()
-			})
-		} else {
-			tracks, err = hardstyle.FetchReleases(ctx, hc, genre, cfg.Pages)
-		}
-		if err != nil {
-			return Result{}, fmt.Errorf(i18n.T("%s lesen: %w", "reading %s: %w"), genre, err)
-		}
-		emit.Logf(i18n.T("hardstyle.com %s: %d Releases", "hardstyle.com %s: %d releases"), hardstyle.GenreLabel(genre), len(tracks))
-		perGenre = append(perGenre, tracks)
+	releases, err := readWindow(ctx, hc, cfg, quick, c, emit)
+	if err != nil {
+		return Result{}, err
 	}
-	emit.Send(event.Event{Kind: event.EvPhase, Phase: event.PhaseFetch, Done: len(cfg.Genres), Total: len(cfg.Genres)})
-
-	releases := interleave(perGenre)
-	if len(releases) == 0 {
-		return Result{}, errors.New(i18n.T("keine Releases auf hardstyle.com gefunden", "no releases found on hardstyle.com"))
+	if len(releases.tracks) == 0 {
+		return Result{Warnings: releases.warnings}, errors.New(i18n.T("keine Releases auf hardstyle.com oder hardtunes.com gefunden", "no releases found on hardstyle.com or hardtunes.com"))
 	}
+	htByPath := releases.hardtunes
 
 	if quick {
-		fresh, due := countWork(releases, c)
+		fresh, due := countWork(releases.tracks, c)
 		if fresh+due == 0 {
-			emit.Logf(i18n.T("Keine neuen Tracks auf hardstyle.com (%d geprüft), nichts zu tun", "No new tracks on hardstyle.com (%d checked), nothing to do"), len(releases))
-			showFromCache(releases, cfg.PlaylistID, c, emit)
+			emit.Logf(i18n.T("Keine neuen Tracks (%d geprüft), nichts zu tun", "No new tracks (%d checked), nothing to do"), len(releases.tracks))
+			showFromCache(releases.tracks, cfg.PlaylistID, c, emit)
 			emit.Send(event.Event{Kind: event.EvPhase, Phase: event.PhaseDone, Done: 1, Total: 1})
-			return Result{Scraped: len(releases)}, nil
+			return Result{Scraped: len(releases.tracks), Warnings: releases.warnings}, nil
 		}
 		emit.Logf(i18n.T("%d neue und %d erneut zu prüfende Tracks gefunden", "%d new and %d to check again found"), fresh, due)
 	}
 
-	res, err := Sync(ctx, sp, cfg.PlaylistID, releases, Options{
+	hsDetails := hardstyle.NewDetailFetcher(hc, hardstyle.DetailDelay)
+	htDetails := hardtunes.NewDetailFetcher(hc, hardtunes.DetailDelay)
+	res, err := Sync(ctx, sp, cfg.PlaylistID, releases.tracks, Options{
 		MaxTracks:      cfg.MaxTracks,
 		MaxSearches:    cfg.MaxSearches,
 		DateTolerance:  cfg.DateTolerance,
 		AlbumMinTracks: cfg.AlbumMinTracks,
 		DryRun:         dryRun,
-		KeepSiteOrder:  len(cfg.Genres) == 1,
-		FetchDetails:   hardstyle.NewDetailFetcher(hc, hardstyle.DetailDelay).Fetch,
+		Order:          cfg.Order,
+		EvalSamples:    cfg.EvalSamples,
+		FetchDetails: func(ctx context.Context, tr hardstyle.Track) (hardstyle.Details, error) {
+			if t, ok := htByPath[tr.Path]; ok {
+				return htDetails.Fetch(ctx, t)
+			}
+			if releases.detailsRead[tr.Path] {
+				// The window read this page a moment ago; what it said is in the cache.
+				e, _ := c.Entry(tr)
+				return hardstyle.Details{Date: e.Date, ISRC: e.ISRC, Catalog: e.Catalog}, nil
+			}
+			return hsDetails.Fetch(ctx, tr)
+		},
 	}, c, emit)
+	res.Warnings = append(releases.warnings, res.Warnings...)
 	if err != nil {
 		return res, err
 	}
@@ -158,20 +184,191 @@ func run(ctx context.Context, hc *http.Client, sp *spotify.Client, cfg config.Co
 	return res, nil
 }
 
-// interleave takes one track from each genre in turn, so a MaxTracks cap treats all genres alike.
-func interleave(lists [][]hardstyle.Track) []hardstyle.Track {
-	var out []hardstyle.Track
-	for i := 0; ; i++ {
-		added := false
-		for _, l := range lists {
-			if i < len(l) {
-				out = append(out, l[i])
-				added = true
+// window is what a run reads from the sites: the newest MaxTracks releases, the hardtunes.com releases among
+// them by page address, so their details are read from the right site, the hardstyle.com release pages read
+// for their dates, so they are not read twice, and what looked wrong on the way (warnings).
+type window struct {
+	tracks      []hardstyle.Track
+	hardtunes   map[string]hardtunes.Track
+	detailsRead map[string]bool
+	warnings    []string
+}
+
+// readWindow reads the newest MaxTracks releases of all lists of both sites, newest first, and no page more:
+// the lists are read page by page, only as far as the newest releases reach. A new release pushes the oldest
+// out of the window, like it pushes the oldest track out of the playlist. The release dates of hardstyle.com
+// are on its release pages; they are read once and kept in the cache. A check for new tracks (quick) reads a
+// list only up to the first page with a release it knows. A list that cannot be read is left out of this run
+// with a warning; the run fails only when no list can be read.
+func readWindow(ctx context.Context, hc *http.Client, cfg config.Config, quick bool, c *cache.Cache, emit event.Emit) (window, error) {
+	w := window{hardtunes: map[string]hardtunes.Track{}, detailsRead: map[string]bool{}}
+	var stopAt func(hardstyle.Track) bool
+	if quick {
+		stopAt = func(t hardstyle.Track) bool {
+			e, ok := c.Entry(t)
+			return ok && !e.At.IsZero()
+		}
+	}
+	var feeds []*feed
+	for _, genre := range cfg.Genres {
+		feeds = append(feeds, &feed{
+			name:     "hardstyle.com " + hardstyle.GenreLabel(genre),
+			genre:    hardstyle.GenreLabel(genre),
+			delay:    hardstyle.PageDelay,
+			maxPages: cfg.Pages,
+			stopAt:   stopAt,
+			fetch: func(ctx context.Context, page int) ([]hardstyle.Track, error) {
+				tracks, err := hardstyle.FetchPage(ctx, hc, genre, page)
+				if errors.Is(err, hardstyle.ErrNoResults) {
+					return nil, errEndOfList
+				}
+				return tracks, err
+			},
+		})
+	}
+	for _, genre := range cfg.HardtunesGenres {
+		name := "hardtunes.com " + hardtunes.GenreLabel(genre)
+		feeds = append(feeds, &feed{
+			name:     name,
+			genre:    hardtunes.GenreLabel(genre),
+			delay:    hardtunes.PageDelay,
+			maxPages: cfg.Pages,
+			stopAt:   stopAt,
+			fetch: func(ctx context.Context, page int) ([]hardstyle.Track, error) {
+				tracks, err := hardtunes.FetchPage(ctx, hc, genre, page)
+				if errors.Is(err, hardtunes.ErrNoResults) {
+					return nil, errEndOfList
+				}
+				if err != nil {
+					return nil, err
+				}
+				// An album is a bundle, not a track: its tunes take its place.
+				if tracks, err = hardtunes.ExpandAlbums(ctx, hc, tracks); err != nil {
+					if ctx.Err() != nil {
+						return nil, ctx.Err()
+					}
+					w.warn(emit, i18n.T("%s: Albumseite nicht lesbar, ihre Tracks fehlen in diesem Lauf: %v", "%s: album page not readable, its tracks are left out this run: %v"), name, err)
+				}
+				out := make([]hardstyle.Track, len(tracks))
+				for i, t := range tracks {
+					rel := t.Release()
+					// The list names fresh releases by day ("Today") and older ones only by week ("Last week").
+					// The day seen once stays: the service looks every few minutes, so it sees most releases on
+					// their day.
+					if e, ok := c.Entry(rel); ok && e.DateExact && !t.DateExact {
+						t.Date, t.DateExact = e.Date, true
+					} else if t.DateExact && (!ok || !e.DateExact) {
+						c.RememberDate(rel, t.Date)
+					}
+					out[i] = rel
+					w.hardtunes[t.Path] = t
+				}
+				return out, nil
+			},
+		})
+	}
+
+	// The date of a release: hardtunes.com names it in its list, hardstyle.com on the release page, which the
+	// cache keeps. A page that cannot be read leaves the date unknown; the release then counts as new as the one
+	// before it in its list.
+	details := hardstyle.NewDetailFetcher(hc, hardstyle.DetailDelay)
+	undated := map[string]bool{}
+	dateOf := func(ctx context.Context, t hardstyle.Track) string {
+		if ht, ok := w.hardtunes[t.Path]; ok {
+			if ht.Date == "" {
+				undated[t.Path] = true
+			}
+			return ht.Date
+		}
+		if e, ok := c.Entry(t); ok && !e.DetailsDue() {
+			return e.Date
+		}
+		d, err := details.Fetch(ctx, t)
+		if err != nil || d.Date == "" {
+			undated[t.Path] = true
+			return ""
+		}
+		c.SetDetails(t, d)
+		w.detailsRead[t.Path] = true
+		return d.Date
+	}
+	emit.Send(event.Event{Kind: event.EvPhase, Phase: event.PhaseFetch, Done: 0, Total: cfg.MaxTracks})
+	tracks, err := newestReleases(ctx, feeds, windowOptions{
+		limit:       cfg.MaxTracks,
+		minPerGenre: cfg.GenreMin,
+		dateOf:      dateOf,
+		isrcOf: func(t hardstyle.Track) string {
+			e, _ := c.Entry(t)
+			return e.ISRC
+		},
+		progress: func(taken int) {
+			emit.Send(event.Event{Kind: event.EvPhase, Phase: event.PhaseFetch, Done: taken, Total: cfg.MaxTracks})
+		},
+	})
+	if saveErr := c.Save(); saveErr != nil {
+		emit.Logf(i18n.T("Zwischenspeicher nicht gespeichert: %v", "Cache not saved: %v"), saveErr)
+	}
+	if err != nil {
+		return w, fmt.Errorf(i18n.T("keine Liste lesbar: %w", "no list readable: %w"), err)
+	}
+	emit.Send(event.Event{Kind: event.EvPhase, Phase: event.PhaseFetch, Done: cfg.MaxTracks, Total: cfg.MaxTracks})
+	pages := 0
+	for _, f := range feeds {
+		pages += f.page
+		if f.page > 0 {
+			emit.Logf(i18n.T("%s: %d Seiten gelesen, %d Releases im Fenster", "%s: %d pages read, %d releases in the window"), f.name, f.page, f.taken)
+		}
+	}
+	emit.Logf(i18n.T("Die neuesten %d Releases (Limit %d) aus %d Listen, %d Seiten gelesen", "The newest %d releases (limit %d) from %d lists, %d pages read"), len(tracks), cfg.MaxTracks, len(feeds), pages)
+	w.tracks = tracks
+	w.checkHealth(feeds, undated, emit)
+	return w, nil
+}
+
+// warn notes something that looked wrong: in the log now, and in the summary of the run.
+func (w *window) warn(emit event.Emit, format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	w.warnings = append(w.warnings, msg)
+	emit.Logf("%s", i18n.T("Warnung: ", "Warning: ")+msg)
+}
+
+// minForCoverage is the number of releases from which a share that is too small means trouble, not chance.
+const minForCoverage = 20
+
+// checkHealth looks at what the lists gave and warns when it looks like a site changed: a list that could not
+// be read, a list that was empty from the first page, many releases without a date, or hardstyle.com lists
+// without the lengths of the tracks.
+func (w *window) checkHealth(feeds []*feed, undated map[string]bool, emit event.Emit) {
+	for _, f := range feeds {
+		switch {
+		case f.err != nil:
+			w.warn(emit, i18n.T("%s nicht lesbar, in diesem Lauf ausgelassen: %v", "%s not readable, left out of this run: %v"), f.name, f.err)
+		case f.empty:
+			w.warn(emit, i18n.T("%s ist leer – gibt es das Genre nicht mehr, oder hat sich die Seite geändert?", "%s is empty – is the genre gone, or did the site change?"), f.name)
+		}
+	}
+	if n := len(w.tracks); n >= minForCoverage {
+		missing := 0
+		for _, t := range w.tracks {
+			if undated[t.Path] {
+				missing++
 			}
 		}
-		if !added {
-			return out
+		if missing*10 > n {
+			w.warn(emit, i18n.T("%d von %d Releases ohne Datum – hat sich eine Seite geändert?", "%d of %d releases without a date – did a site change?"), missing, n)
 		}
+	}
+	hs, timed := 0, 0
+	for _, t := range w.tracks {
+		if !fromHardtunes(t) {
+			hs++
+			if t.Duration > 0 {
+				timed++
+			}
+		}
+	}
+	if hs >= minForCoverage && timed == 0 {
+		w.warn(emit, "%s", i18n.T("keine Tracklängen in den Listen von hardstyle.com – hat sich die Seite geändert?", "no track lengths in the hardstyle.com lists – did the site change?"))
 	}
 }
 
@@ -294,12 +491,21 @@ const maxDescription = 300
 // descriptionOff in PLAYLIST_DESCRIPTION leaves the description of the playlist alone.
 const descriptionOff = "off"
 
-// defaultDescription is the description of the playlist, in English. {source}, {max} and {date} are filled in.
-const defaultDescription = "Daily updated. The latest {source} releases from hardstyle.com, in the same order as on the site " +
-	"(newest first), max. {max} tracks. Last update: {date}"
+// defaultDescription is the description of the playlist, in English. {source}, {sites}, {order}, {max} and
+// {date} are filled in.
+const defaultDescription = "Daily updated. The latest {source} releases from {sites}, {order}, max. {max} tracks. " +
+	"Last update: {date}"
+
+// orderText says the order of the playlist in the description.
+var orderText = map[config.Order]string{
+	config.OrderNewest: "newest first",
+	config.OrderOldest: "oldest first",
+	config.OrderArtist: "sorted by artist",
+	config.OrderTitle:  "sorted by title",
+}
 
 // playlistDescription builds the description of the playlist: what it is, where it comes from and when it was
-// updated last. PLAYLIST_DESCRIPTION replaces the text; {source}, {max} and {date} are filled in.
+// updated last. PLAYLIST_DESCRIPTION replaces the text; {source}, {sites}, {order}, {max} and {date} are filled in.
 func playlistDescription(cfg config.Config, now time.Time) string {
 	text := cfg.Description
 	if text == "" {
@@ -312,8 +518,14 @@ func playlistDescription(cfg config.Config, now time.Time) string {
 	case len(cfg.Genres) > 0:
 		source = strings.Join(cfg.Genres, ", ")
 	}
+	sites := "hardstyle.com"
+	if len(cfg.HardtunesGenres) > 0 {
+		sites = "hardstyle.com and hardtunes.com"
+	}
 	text = strings.NewReplacer(
 		"{source}", source,
+		"{sites}", sites,
+		"{order}", orderText[cmp.Or(cfg.Order, config.OrderNewest)],
 		"{max}", fmt.Sprint(cfg.MaxTracks),
 		"{date}", now.Format("2 Jan 2006"),
 	).Replace(text)

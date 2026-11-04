@@ -27,7 +27,7 @@ var testGenres = []string{"Hardstyle", "Hardcore", "Uptempo"}
 
 // demoModel returns a model in the middle of a run, as if the events had come in.
 func demoModel(width, height, releases int) *model {
-	m := newModel(context.Background(), Options{Genres: testGenres, Pages: 4, MaxTracks: 500, Every: 24 * time.Hour})
+	m := newModel(context.Background(), Options{Genres: testGenres, MaxTracks: 500, Every: 24 * time.Hour})
 	m.cancel = func() {}
 	m.running = true
 	m.Update(tea.WindowSizeMsg{Width: width, Height: height})
@@ -445,7 +445,7 @@ func withLanguage(t *testing.T, name string) {
 }
 
 func TestAppsLine(t *testing.T) {
-	m := newModel(context.Background(), Options{Genres: testGenres, Pages: 4, MaxTracks: 500})
+	m := newModel(context.Background(), Options{Genres: testGenres, MaxTracks: 500})
 	if got := m.appsText(); got != "–" {
 		t.Errorf("without apps: %q", got)
 	}

@@ -27,7 +27,6 @@ const (
 // Options configures the interface.
 type Options struct {
 	Genres    []string
-	Pages     int
 	MaxTracks int
 	// MaxSearches and RequestDelay are the limits that keep the Spotify requests few and slow.
 	MaxSearches  int

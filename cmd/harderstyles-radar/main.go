@@ -11,13 +11,18 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
+	"strings"
 	"syscall"
 	"time"
 
 	"hardstylesync/internal/cache"
+	"hardstylesync/internal/compare"
 	"hardstylesync/internal/config"
 	"hardstylesync/internal/corrections"
+	"hardstylesync/internal/eval"
 	"hardstylesync/internal/event"
+	"hardstylesync/internal/hardtunes"
 	"hardstylesync/internal/i18n"
 	"hardstylesync/internal/spotify"
 	"hardstylesync/internal/sync"
@@ -25,7 +30,7 @@ import (
 )
 
 // version is set through -ldflags.
-var version = "1.0.0"
+var version = "1.2.0"
 
 func main() {
 	auth := flag.Bool("auth", false, "log in to Spotify once and print the refresh token")
@@ -36,6 +41,8 @@ func main() {
 	watch := flag.Duration("watch", -1, "service: keep running and check hardstyle.com for new tracks this often, e.g. 15m (default: WATCH_INTERVAL)")
 	lang := flag.String("lang", "", "language of the interface and the messages: de or en (default: UI_LANGUAGE, else de)")
 	noTUI := flag.Bool("no-tui", false, "plain log output instead of the interface (always the case without a terminal)")
+	doCompare := flag.Bool("compare", false, "compare the releases of hardstyle.com and hardtunes.com with each other and exit (no Spotify needed)")
+	doEvaluate := flag.Bool("evaluate", false, "measure the Spotify matching offline on what the cache learned and exit (no Spotify needed)")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -56,6 +63,30 @@ func main() {
 	}
 	if err := i18n.SetLanguage(name); err != nil {
 		log.Fatal(err)
+	}
+	if *doCompare {
+		cfg, err := config.LoadCompare()
+		if err != nil {
+			log.Fatal(err)
+		}
+		rep, err := compare.Run(ctx, httpClient, cfg, func(format string, args ...any) { fmt.Printf(format+"\n", args...) })
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Print(compare.Render(rep))
+		return
+	}
+	if *doEvaluate {
+		cfg, err := config.LoadCompare()
+		if err != nil {
+			log.Fatal(err)
+		}
+		c, err := cache.Load(cfg.CacheFile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Print(eval.Evaluate(c, spotify.MatchOptions{Tolerance: cfg.DateTolerance}).String())
+		return
 	}
 	cfg, err := config.Load(!*auth && !*status)
 	if err != nil {
@@ -86,7 +117,7 @@ func main() {
 	if !*noTUI && isTerminal(os.Stdin) && isTerminal(os.Stdout) {
 		tui.Version = version
 		if err := tui.Run(ctx, tui.Options{
-			Genres: cfg.Genres, Pages: cfg.Pages, MaxTracks: cfg.MaxTracks, DryRun: *dryRun, Every: *every, Watch: cfg.WatchInterval,
+			Genres: uiGenres(cfg), MaxTracks: cfg.MaxTracks, DryRun: *dryRun, Every: *every, Watch: cfg.WatchInterval,
 			MaxSearches: cfg.MaxSearches, Apps: sp.Apps, RequestDelay: cfg.RequestDelay, ContinueDelay: cfg.ContinueDelay,
 			Run: func(ctx context.Context, dryRun, quick bool, emit event.Emit) (sync.Result, error) {
 				return sync.Run(ctx, httpClient, sp, cfg, dryRun, quick, emit)
@@ -150,6 +181,17 @@ func logEmit(ev event.Event) {
 	if ev.Kind == event.EvLog {
 		log.Print(ev.Msg)
 	}
+}
+
+// uiGenres are the genres the interface can filter by: those of hardstyle.com, then those only hardtunes.com has.
+func uiGenres(cfg config.Config) []string {
+	out := slices.Clone(cfg.Genres)
+	for _, g := range cfg.HardtunesGenres {
+		if l := hardtunes.GenreLabel(g); !slices.ContainsFunc(out, func(o string) bool { return strings.EqualFold(o, l) }) {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 func isTerminal(f *os.File) bool {

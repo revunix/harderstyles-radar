@@ -61,6 +61,7 @@ type fakeTrack struct {
 	AlbumID, AlbumName, AlbumType string
 	AlbumTotal                    int
 	Hidden                        bool // only on the track list of its album, no search finds it
+	Seconds                       int  // length; 0 = the answer has none
 }
 
 // album returns the album of the track as Spotify's search names it.
@@ -133,10 +134,10 @@ func (f *fakeSpotify) handler(t *testing.T) http.Handler {
 					(!strings.HasPrefix(q, "isrc:") && strings.Contains(q, c.Key)) {
 					var names []string
 					for _, a := range c.Artists {
-						names = append(names, fmt.Sprintf(`{"name":%q}`, a))
+						names = append(names, fmt.Sprintf(`{"name":%q,"id":%q}`, a, "id-"+a))
 					}
-					items = append(items, fmt.Sprintf(`{"uri":%q,"name":%q,"artists":[%s],"album":%s}`,
-						c.URI, c.Name, strings.Join(names, ","), c.album()))
+					items = append(items, fmt.Sprintf(`{"uri":%q,"name":%q,"artists":[%s],"duration_ms":%d,"album":%s}`,
+						c.URI, c.Name, strings.Join(names, ","), c.Seconds*1000, c.album()))
 				}
 			}
 			fmt.Fprintf(w, `{"tracks":{"items":[%s]}}`, strings.Join(items, ","))

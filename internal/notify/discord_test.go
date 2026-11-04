@@ -77,7 +77,7 @@ func TestRunSummaryInGerman(t *testing.T) {
 			t.Errorf("description lacks %q:\n%s", want, e.Description)
 		}
 	}
-	if len(e.Fields) != 6 || e.Fields[0].Name != "Neu" || e.Fields[0].Value != "2" || e.Fields[3].Value != "2" || e.Fields[5].Value != "9" {
+	if len(e.Fields) != 7 || e.Fields[0].Name != "Neu" || e.Fields[0].Value != "2" || e.Fields[3].Value != "2" || e.Fields[4].Name != "Unsicher" || e.Fields[6].Value != "9" {
 		t.Errorf("fields = %+v", e.Fields)
 	}
 	if len(got.AllowedMentions.Parse) != 0 {
@@ -111,8 +111,25 @@ func TestQuietFullRunHasItsOwnTitle(t *testing.T) {
 	if e.Title != "No new tracks" || e.Color != colorQuiet {
 		t.Errorf("title=%q color=%#x", e.Title, e.Color)
 	}
-	if !strings.Contains(e.Description, "No new tracks on hardstyle.com · 498 tracks in the playlist") {
+	if !strings.Contains(e.Description, "No new tracks · 498 tracks in the playlist") {
 		t.Errorf("description = %q", e.Description)
+	}
+}
+
+func TestWarningsAndUncertainReleasesAreShown(t *testing.T) {
+	withLanguage(t, "en")
+	srv, got, _ := webhookServer(t)
+	err := SendRun(context.Background(), srv.Client(), srv.URL, RunSummary{At: day, After: 10,
+		Uncertain: []hardstyle.Track{{Artist: "A", Title: "Song", Version: "Extended Mix"}},
+		Warnings:  []string{"hardtunes.com Terror not readable"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := got.Embeds[0].Description
+	for _, want := range []string{"Uncertain", "A – Song (Extended Mix)", "Warnings", "hardtunes.com Terror not readable"} {
+		if !strings.Contains(d, want) {
+			t.Errorf("description lacks %q: %q", want, d)
+		}
 	}
 }
 

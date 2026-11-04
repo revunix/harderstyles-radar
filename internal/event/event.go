@@ -22,6 +22,9 @@ const (
 	StatusNotFound
 	// StatusMismatch: a track with this name exists, but with another release date than on hardstyle.com.
 	StatusMismatch
+	// StatusUncertain: two different Spotify tracks fit almost equally well; none is taken until a correction
+	// decides. It is looked for again when it is due.
+	StatusUncertain
 )
 
 // Phase is the step a run is in.

@@ -302,7 +302,7 @@ func (m *model) detailBox(r rect) []string {
 func (m *model) hintFor(it item) string {
 	// The extra versions are no reason for the release itself, so the note about them does not replace the hint.
 	if it.note != "" && !strings.HasPrefix(it.note, "+") {
-		if it.status == event.StatusNotFound || it.status == event.StatusMismatch {
+		if it.status == event.StatusNotFound || it.status == event.StatusMismatch || it.status == event.StatusUncertain {
 			return it.note + i18n.T(". Beim nächsten Lauf wird erneut gesucht.", ". It is searched again at the next run.")
 		}
 		return it.note + "."
@@ -346,9 +346,9 @@ func (m *model) infoBox(r rect) []string {
 	if !m.lastRun.IsZero() {
 		last = m.lastRun.Format("15:04:05")
 	}
-	genres := fmt.Sprintf("%d Genres · %d × 30", len(m.opts.Genres), m.opts.Pages)
+	genres := fmt.Sprintf("%d Genres", len(m.opts.Genres))
 	if len(m.opts.Genres) == 1 {
-		genres = fmt.Sprintf("%s · %d × 30", hardstyle.GenreLabel(m.opts.Genres[0]), m.opts.Pages)
+		genres = hardstyle.GenreLabel(m.opts.Genres[0])
 	}
 	mode := theme.Success.Render(i18n.T("schreibt", "writes"))
 	if m.dryRun {
