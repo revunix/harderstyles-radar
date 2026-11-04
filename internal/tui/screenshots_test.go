@@ -164,9 +164,9 @@ func shotModel() *model {
 		err  bool
 	}{
 		{"Run started", false},
-		{"hardstyle.com · Hardstyle: 120 releases on 4 pages", false},
-		{"hardstyle.com · Hardcore: 118 releases on 4 pages", false},
-		{"hardstyle.com · Uptempo: 96 releases on 4 pages", false},
+		{"hardstyle.com · Hardstyle: 4 pages read, 120 releases in the window", false},
+		{"hardtunes.com · Terror: 1 page read, 12 releases in the window", false},
+		{"The newest 500 releases (limit 500) from 14 lists, 31 pages read", false},
 		{"Playlist read: 487 tracks, snapshot up to date", false},
 		{"Spotify app #1 in use", false},
 		{"Found: Sub Zero Project – Lose Control", false},
