@@ -86,7 +86,8 @@ func TestVersionsOfTheSameSongAllGoIn(t *testing.T) {
 
 func TestISRCFindsWhatTheNamesCannot(t *testing.T) {
 	f := &fakeSpotify{catalog: []fakeTrack{
-		{URI: "spotify:track:X", Name: "Totally Different Name", Artists: []string{"Other Artist"}, Date: "2020-01-01", ISRC: "NLABC2600001", Key: "never matched by text"},
+		// Another name, another artist: no title search finds it. The date is that of the release.
+		{URI: "spotify:track:X", Name: "Totally Different Name", Artists: []string{"Other Artist"}, Date: "2026-10-26", ISRC: "NLABC2600001", Key: "never matched by text"},
 	}}
 	sp := newFakeClient(t, f)
 	c, _ := newCache(t)

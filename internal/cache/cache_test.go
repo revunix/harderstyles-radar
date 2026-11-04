@@ -185,3 +185,33 @@ func TestLearnedArtistsSurviveASave(t *testing.T) {
 		t.Errorf("ids = %v", got)
 	}
 }
+
+func TestAMatchOfAnotherTimeIsDroppedOnce(t *testing.T) {
+	c, path := newCache(t)
+	old := hardstyle.Track{ID: "old", Title: "Song", Artist: "A"}
+	same := hardstyle.Track{ID: "same", Title: "Other", Artist: "A"}
+	forced := hardstyle.Track{ID: "forced", Title: "Third", Artist: "A"}
+	c.SetDetails(old, hardstyle.Details{Date: "2026-10-29", ISRC: "GB1"})
+	c.SetFound(old, Found{URIs: []string{"spotify:track:OLD"}, SpotifyDate: "2023-05-01"})
+	c.SetDetails(same, hardstyle.Details{Date: "2026-10-29"})
+	c.SetFound(same, Found{URIs: []string{"spotify:track:SAME"}, SpotifyDate: "2026-10-30"})
+	c.Force(forced, "spotify:track:FORCED")
+	c.f.Matcher = 1 // as if the cache came from an older matcher
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	again, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e, _ := again.Entry(old); e.URI != "" || e.ISRC != "GB1" {
+		t.Errorf("old match = %+v, want it dropped and the ISRC kept", e)
+	}
+	if e, _ := again.Entry(same); e.URI != "spotify:track:SAME" {
+		t.Errorf("a match of the right day must stay: %+v", e)
+	}
+	if e, _ := again.Entry(forced); e.URI != "spotify:track:FORCED" || e.Forced == "" {
+		t.Errorf("a forced match must stay: %+v", e)
+	}
+}

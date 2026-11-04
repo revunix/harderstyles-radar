@@ -17,7 +17,7 @@ const (
 	cacheVersion = 2
 	// matcherVersion counts the changes of how releases are matched to Spotify tracks. When it grows, the
 	// releases that were not found are looked for again at once: the better matching may find them now.
-	matcherVersion = 6
+	matcherVersion = 7
 	// detailsVersion counts what is read from the page of a release. When it grows, the pages are read again
 	// once (2: the catalog number).
 	detailsVersion = 2
@@ -166,14 +166,37 @@ func Load(path string) (*Cache, error) {
 	}
 	if c.f.Matcher < matcherVersion {
 		for k, e := range c.f.Tracks {
-			if e.URI == "" && !e.At.IsZero() {
+			switch {
+			case e.URI == "" && !e.At.IsZero():
 				e.At = time.Time{} // not searched yet, as far as the new matching is concerned
-				c.f.Tracks[k] = e
+			case e.URI != "" && e.Forced == "" && staleMatch(e.Date, e.SpotifyDate):
+				// The track came out at another time than the release (an old re-master or compilation): it
+				// must not stay in a playlist of the newest releases, so the release is looked up again.
+				e = Entry{ISRC: e.ISRC, Catalog: e.Catalog, Date: e.Date, DateExact: e.DateExact,
+					DetailsV: e.DetailsV, Rejected: e.Rejected}
 			}
+			c.f.Tracks[k] = e
 		}
 		c.f.Matcher, c.dirty = matcherVersion, true
 	}
 	return c, nil
+}
+
+// staleMatch tells whether the release date of a Spotify track is too far from the date of the release for it
+// to be that release (the grace the two sides may be apart).
+func staleMatch(siteDate, spotifyDate string) bool {
+	if siteDate == "" || spotifyDate == "" {
+		return false
+	}
+	precision := "day"
+	switch len(spotifyDate) {
+	case 4:
+		precision = "year"
+	case 7:
+		precision = "month"
+	}
+	ok, diff := match.Date(siteDate, spotifyDate, precision, 0)
+	return !ok && (diff == 0 || diff > match.GraceDays)
 }
 
 func cacheKey(t hardstyle.Track) string {

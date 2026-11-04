@@ -12,6 +12,7 @@ import (
 	"hardstylesync/internal/config"
 	"hardstylesync/internal/hardstyle"
 	"hardstylesync/internal/hardtunes"
+	"hardstylesync/internal/spotify"
 )
 
 func TestAReleaseThatIsNotOutYetIsNotSearched(t *testing.T) {
@@ -97,5 +98,37 @@ func TestRunWarnsAndGoesOnWhenAListIsBroken(t *testing.T) {
 	}
 	if len(f.titles()) != 3 || !slices.ContainsFunc(res.Warnings, func(w string) bool { return strings.Contains(w, "hardtunes.com Terror") }) {
 		t.Errorf("playlist=%v warnings=%v: the good list goes in, the broken one is reported", f.titles(), res.Warnings)
+	}
+}
+
+func TestAnOldRecordingIsNotTakenForANewRelease(t *testing.T) {
+	// Spotify has the recording only as a 2023 re-master; the release is from 2026.
+	f := &fakeSpotify{catalog: []fakeTrack{
+		{URI: "spotify:track:OLD", Name: "Song", Artists: []string{"A"}, Date: "2023-05-01", Key: "song", ISRC: "GB1"},
+	}}
+	sp := newFakeClient(t, f)
+	c, _ := newCache(t)
+	o := opts(nil)
+	o.FetchDetails = func(context.Context, hardstyle.Track) (hardstyle.Details, error) {
+		return hardstyle.Details{Date: "2026-10-29", ISRC: "GB1"}, nil
+	}
+	tr := hardstyle.Track{ID: "1", Title: "Song", Artist: "A"}
+	res := mustSync(t, sp, []hardstyle.Track{tr}, o, c)
+	if len(f.titles()) != 0 || len(res.Unmatched) != 1 {
+		t.Fatalf("playlist=%v unmatched=%v: a track from 2023 must not enter a playlist of a 2026 release", f.titles(), res.Unmatched)
+	}
+	if e, _ := c.Entry(tr); e.URI != "" || e.Reason != spotify.ReasonDate {
+		t.Errorf("entry = %+v, want missing with a date mismatch", e)
+	}
+}
+
+func TestSinceIsTheOldestReleaseLessTheGrace(t *testing.T) {
+	c, _ := newCache(t)
+	a := hardstyle.Track{ID: "a", Path: "/en/tracks/a", Title: "A"}
+	b := hardstyle.Track{ID: "b", Path: "/en/tracks/b", Title: "B"}
+	c.SetDetails(a, hardstyle.Details{Date: "2026-10-29"})
+	c.SetDetails(b, hardstyle.Details{Date: "2026-10-02"})
+	if got := sinceOf([]hardstyle.Track{a, b}, nil, c); got != "2026-08-18" {
+		t.Errorf("since = %q, want the oldest day (2026-10-02) less %d days", got, 45)
 	}
 }

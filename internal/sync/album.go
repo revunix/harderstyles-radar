@@ -108,7 +108,11 @@ func pickAlbum(g albumGroup, known []resolved, cands map[int][]spotify.Candidate
 	}
 	isSingle := func(v *albumVote) bool { return v.album.Type == "single" }
 	daysOff := func(v *albumVote) int {
-		_, diff := match.Date(siteDate, v.date, precisionOf(v.date), 0)
+		ok, diff := match.Date(siteDate, v.date, precisionOf(v.date), 0)
+		if !ok && diff == 0 {
+			// Another year or month: match.Date names no distance then, but this is certainly not the album.
+			return match.GraceDays + 1
+		}
 		return diff
 	}
 	sort.Slice(all, func(i, j int) bool {

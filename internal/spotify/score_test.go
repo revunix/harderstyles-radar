@@ -268,9 +268,77 @@ func (f *fakeSearch) client(t *testing.T) *Client {
 }
 
 func item(id, name string, ms int) string {
+	return itemOn(id, name, ms, "2026-10-29")
+}
+
+// itemOn is an item of a search answer released on the given date ("2026-10-29", "2026-10" or "2026").
+func itemOn(id, name string, ms int, date string) string {
+	precision := "day"
+	switch len(date) {
+	case 4:
+		precision = "year"
+	case 7:
+		precision = "month"
+	}
 	return fmt.Sprintf(`{"uri":"spotify:track:%s","name":%q,"duration_ms":%d,"artists":[{"id":"ar1","name":"A"}],`+
-		`"album":{"id":"al-%s","name":%q,"album_type":"single","total_tracks":1,"release_date":"2026-10-29","release_date_precision":"day"}}`,
-		id, name, ms, id, name)
+		`"album":{"id":"al-%s","name":%q,"album_type":"single","total_tracks":1,"release_date":%q,"release_date_precision":%q}}`,
+		id, name, ms, id, name, date, precision)
+}
+
+func TestISRCDoesNotTakeATrackOfAnotherYear(t *testing.T) {
+	ctx := context.Background()
+	site := hardstyle.Track{Title: "Song", Artist: "A"}
+	d := hardstyle.Details{Date: "2026-10-29", ISRC: "NL1"}
+
+	// The recording lies on Spotify only as an old re-master; the title search finds the new release.
+	f := &fakeSearch{isrc: map[string][]string{"NL1": {itemOn("OLD", "Song", 200000, "2023-05-01")}},
+		items: []string{itemOn("NEW", "Song", 200000, "2026-10-29")}}
+	look, err := f.client(t).FindTrack(ctx, site, d, MatchOptions{})
+	if err != nil || !slices.Equal(look.URIs, uris("NEW")) || look.ByISRC {
+		t.Errorf("look = %+v err = %v, want the release of this year, not the re-master", look, err)
+	}
+
+	// Only the old one exists: nothing is taken, and the answer names the date that was too far off.
+	f = &fakeSearch{isrc: map[string][]string{"NL1": {itemOn("OLD", "Song", 200000, "2023-05-01")}}}
+	look, err = f.client(t).FindTrack(ctx, site, d, MatchOptions{})
+	if err != nil || len(look.URIs) != 0 || look.Reason != ReasonDate || look.SpotifyDate != "2023-05-01" {
+		t.Errorf("look = %+v err = %v, want nothing taken and a date mismatch", look, err)
+	}
+}
+
+func TestISRCTakesATrackWithinTheGrace(t *testing.T) {
+	ctx := context.Background()
+	f := &fakeSearch{isrc: map[string][]string{"NL1": {itemOn("I", "Song", 200000, "2026-10-05")}}}
+	site := hardstyle.Track{Title: "Song", Artist: "A"}
+	look, err := f.client(t).FindTrack(ctx, site, hardstyle.Details{Date: "2026-10-29", ISRC: "NL1"}, MatchOptions{Tolerance: 14})
+	if err != nil || !slices.Equal(look.URIs, uris("I")) || !look.ByISRC || look.DaysOff != 24 {
+		t.Errorf("look = %+v err = %v, want the same recording 24 days off, taken and marked", look, err)
+	}
+}
+
+// yearOnly is a track whose Spotify date names only the year.
+func yearOnly(t Track, y string) Track {
+	t.ReleaseDate, t.DatePrecision = y, "year"
+	return t
+}
+
+func TestWithoutASiteDateOnlyTheWindowFloorHolds(t *testing.T) {
+	site := hardstyle.Track{Title: "Song", Artist: "A"}
+	for _, c := range []struct {
+		name string
+		t    Track
+		want []string
+	}{
+		{"old track", on(track("OLD", "Song", 200, "A"), "2023-05-01"), nil},
+		{"new track", track("NEW", "Song", 200, "A"), uris("NEW")},
+		{"old track, a year only", yearOnly(track("Y", "Song", 200, "A"), "2023"), nil},
+		{"this year, a year only", yearOnly(track("Y", "Song", 200, "A"), "2026"), uris("Y")},
+	} {
+		look := Decide(site, hardstyle.Details{}, []Track{c.t}, MatchOptions{Since: "2026-09-01"})
+		if !slices.Equal(look.URIs, c.want) {
+			t.Errorf("%s: uris = %v, want %v", c.name, look.URIs, c.want)
+		}
+	}
 }
 
 func TestFindTrack(t *testing.T) {

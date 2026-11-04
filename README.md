@@ -236,7 +236,12 @@ To keep it running in the background, wrap the command above in a launchd agent 
 For each release the tool works through the following steps and stops at the first answer, to save requests:
 
 1. **ISRC:** The release pages of both sites name the ISRC, the globally unique code of the recording. Spotify is
-   searched for it exactly (one request). Not every track has the same code on Spotify; then the tool moves on.
+   searched for it exactly (one request). The recording is certain, but its **release date is checked as well**: the
+   same recording comes out again years later on a re-master or a compilation, and such an old track must not enter
+   a playlist of the newest releases. A track whose Spotify date is within `DATE_TOLERANCE_DAYS` is taken; up to 45
+   days off it is taken and marked; more than that and the release goes to the title search instead (and is reported
+   as “date differs” when that finds nothing either). Not every track has the same code on Spotify; then the tool
+   moves on as well.
 2. **Title search, scored:** Spotify is searched for title and artist (a second, fielded search only if the first
    decides nothing). Every track found gets a score:
 
@@ -249,7 +254,8 @@ For each release the tool works through the following steps and stops at the fir
    | Date within `DATE_TOLERANCE_DAYS` / up to 45 days off / more | 0 / up to −1 / rejected |
 
    A clean match scores about 4; the best track is taken from 1 point on. The length is what tells an Extended
-   Mix (5:30) from a Radio Edit (3:10) when Spotify's titles do not.
+   Mix (5:30) from a Radio Edit (3:10) when Spotify's titles do not. When a release page names no date at all, no
+   track older than the oldest release of the window (less the same 45 days) is taken.
 3. **Uncertain:** When a *different* recording scores almost the same (less than 0.75 points behind) and nothing
    else prefers the best — a better title, or a length that fits where the other's does not — the tool takes
    neither: a wrong track in the playlist is worse than a missing one. The release shows as “uncertain” in the UI and
@@ -298,13 +304,16 @@ can be judged by numbers instead of by feel. The numbers grow with every run.
   only two write requests; other orders and a wrong order are rewritten with 1 to 5 requests. Tracks that are no
   longer among the newest releases stay as long as there is room, ranked by their release date; beyond
   `MAX_TRACKS` the oldest drop out.
-- **Date:** For each release the tool reads the release date from its page on hardstyle.com and compares it with
-  the Spotify match. A few days of difference are normal and allowed (`DATE_TOLERANCE_DAYS`, default 14); if title
+- **Date:** For each release the tool reads the release date from its page (hardstyle.com: the release page,
+  hardtunes.com: the tune page) and compares it with the Spotify match — on every path, also when the ISRC found
+  the recording. A few days of difference are normal and allowed (`DATE_TOLERANCE_DAYS`, default 14); if title
   and artist match and the difference stays below 45 days, the track is included as well and marked “Date differs
-  by N days”. This way neither an old version of the same title ends up in the playlist, nor is a track missing
-  because the two sites name the day differently. The date is shown in the UI in the list and in the details;
-  `✗ date` means: a track with that name exists, but with a clearly different date. Note: albums that contain
-  singles released earlier are also sorted out by this (that is what the album check via the catalog number is for).
+  by N days”. Beyond that it is not taken, whatever named it: this way neither an old version of the same title
+  nor an old re-master with the same ISRC ends up in the playlist. The date is shown in the UI in the list and in
+  the details; `✗ date` means: a track with that name exists, but with a clearly different date. Matches already
+  in the cache whose Spotify date is that far off are dropped once, so they are searched again. Note: albums that
+  contain singles released earlier are also sorted out by this (that is what the album check via the catalog
+  number is for).
 - **Missing tracks:** Whatever is missing on Spotify (not found or wrong date) is remembered with the reason and
   the number of attempts, and searched again on the next run after 12 hours at the latest.
 - **What already exists:** The playlist is stored in the cache together with its snapshot. On startup the tool only

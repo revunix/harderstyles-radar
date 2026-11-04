@@ -35,6 +35,10 @@ type MatchOptions struct {
 	// MinScore is the score the best track needs (see Score); MinMargin how far it must be ahead of a different
 	// recording. 0 takes DefaultMinScore and DefaultMinMargin; the evaluation tries other values.
 	MinScore, MinMargin float64
+	// Since is the oldest day (yyyy-mm-dd) a Spotify track may have when the release's own date is unknown
+	// ("" = no such limit). The window of the run knows how old its oldest release is; a track from years ago
+	// must not enter a playlist of the newest releases just because the date of the release could not be read.
+	Since string
 }
 
 // maxVersions is the largest number of Spotify tracks (versions of one song) a release brings into the playlist.
@@ -84,9 +88,10 @@ func (s *Client) FindTrack(ctx context.Context, t hardstyle.Track, d hardstyle.D
 		if err != nil {
 			return Lookup{}, err
 		}
-		if look := byISRC(found, d.Date); len(look.URIs) > 0 {
+		look := byISRC(found, d, o)
+		if len(look.URIs) > 0 {
 			for _, f := range found {
-				_, diff := match.Date(d.Date, f.ReleaseDate, f.DatePrecision, 0)
+				_, diff := dateFits(d.Date, f.ReleaseDate, f.DatePrecision, o)
 				look.Candidates = append(look.Candidates, Candidate{Track: f, Kind: match.Exact, Diff: diff})
 			}
 			look.ByISRC = true
@@ -100,6 +105,16 @@ func (s *Client) FindTrack(ctx context.Context, t hardstyle.Track, d hardstyle.D
 			look.Searched, look.Sampled = byTitle.Searched, true
 			return look, nil
 		}
+		// The ISRC names only recordings that came out at another time (a re-master, a compilation): the title
+		// search decides, and when it finds nothing the answer still says that a track exists, with another date.
+		byTitle, err := s.findByTitle(ctx, t, d, o)
+		if err != nil {
+			return Lookup{}, err
+		}
+		if len(byTitle.URIs) == 0 && byTitle.Reason == ReasonNotFound && look.Reason == ReasonDate {
+			byTitle.Reason, byTitle.SpotifyDate = ReasonDate, look.SpotifyDate
+		}
+		return byTitle, nil
 	}
 	return s.findByTitle(ctx, t, d, o)
 }
@@ -127,18 +142,39 @@ func (s *Client) findByTitle(ctx context.Context, t hardstyle.Track, d hardstyle
 	return look, nil
 }
 
-// byISRC takes the answer of a search for an ISRC: the tracks have that recording. The same recording can be on
-// a single and on an album; one of each title is taken, the nearest release date first.
-func byISRC(found []Track, siteDate string) Lookup {
-	var cands []Candidate
+// byISRC takes the answer of a search for an ISRC: the tracks have that recording. The same recording comes out
+// again years later on a re-master or a compilation, so only a track whose release date fits the date of the
+// release counts; an old track must not enter a playlist of the newest releases. Within the tolerance the date
+// costs nothing, up to match.GraceDays the track is taken and marked (DaysOff). One track per title is taken,
+// at most two, the nearest date first.
+func byISRC(found []Track, d hardstyle.Details, o MatchOptions) Lookup {
+	var good, near []Candidate
+	nearest, nearestDiff := "", 1<<31-1
 	for _, f := range found {
-		_, diff := match.Date(siteDate, f.ReleaseDate, f.DatePrecision, 0)
-		cands = append(cands, Candidate{Track: f, Diff: diff})
+		ok, diff := dateFits(d.Date, f.ReleaseDate, f.DatePrecision, o)
+		if diff < nearestDiff {
+			nearest, nearestDiff = f.ReleaseDate, diff
+		}
+		c := Candidate{Track: f, Kind: match.Exact, Diff: diff}
+		switch {
+		case ok:
+			good = append(good, c)
+		case diff > o.Tolerance && diff <= match.GraceDays:
+			near = append(near, c)
+		}
 	}
-	sort.SliceStable(cands, func(i, j int) bool { return cands[i].Diff < cands[j].Diff })
+	if len(good) == 0 && len(near) == 0 {
+		if len(found) == 0 {
+			return Lookup{Reason: ReasonNotFound}
+		}
+		return Lookup{Reason: ReasonDate, SpotifyDate: nearest}
+	}
+	sort.SliceStable(good, func(i, j int) bool { return good[i].Diff < good[j].Diff })
+	sort.SliceStable(near, func(i, j int) bool { return near[i].Diff < near[j].Diff })
+	pick := append(good, near...)
 	var look Lookup
 	titles := map[string]bool{}
-	for _, c := range cands {
+	for _, c := range pick {
 		key := match.NormTitle(c.Track.Name)
 		if titles[key] || len(look.URIs) >= 2 {
 			continue
@@ -147,6 +183,9 @@ func byISRC(found []Track, siteDate string) Lookup {
 		look.URIs = append(look.URIs, c.Track.URI)
 		if look.SpotifyDate == "" {
 			look.SpotifyDate = c.Track.ReleaseDate
+		}
+		if c.Diff > o.Tolerance && (look.DaysOff == 0 || c.Diff < look.DaysOff) {
+			look.DaysOff = c.Diff
 		}
 	}
 	return look

@@ -35,6 +35,9 @@ type Options struct {
 	// EvalSamples is how many releases the ISRC finds in this run are also searched by title, for the
 	// evaluation (see config.Config.EvalSamples).
 	EvalSamples int
+	// Since is the oldest day a Spotify track may have when the release's own date is unknown (yyyy-mm-dd);
+	// the window of the run knows it. "" = no such limit.
+	Since string
 }
 
 type Result struct {
@@ -446,6 +449,7 @@ func resolveAll(ctx context.Context, sp *spotify.Client, releases []hardstyle.Tr
 		look, err := sp.FindTrack(ctx, tr, details, spotify.MatchOptions{
 			Tolerance: opt.DateTolerance,
 			ArtistIDs: c.ArtistIDs,
+			Since:     opt.Since,
 			Sample:    samples > 0 && details.ISRC != "",
 		})
 		if err != nil {

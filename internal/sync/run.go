@@ -12,6 +12,7 @@ import (
 	"hardstylesync/internal/hardstyle"
 	"hardstylesync/internal/hardtunes"
 	"hardstylesync/internal/i18n"
+	"hardstylesync/internal/match"
 	"hardstylesync/internal/notify"
 	"hardstylesync/internal/spotify"
 	"log"
@@ -159,6 +160,7 @@ func run(ctx context.Context, hc *http.Client, sp *spotify.Client, cfg config.Co
 		DryRun:         dryRun,
 		Order:          cfg.Order,
 		EvalSamples:    cfg.EvalSamples,
+		Since:          releases.since,
 		FetchDetails: func(ctx context.Context, tr hardstyle.Track) (hardstyle.Details, error) {
 			if t, ok := htByPath[tr.Path]; ok {
 				return htDetails.Fetch(ctx, t)
@@ -192,6 +194,9 @@ type window struct {
 	hardtunes   map[string]hardtunes.Track
 	detailsRead map[string]bool
 	warnings    []string
+	// since is the oldest day a Spotify track may have for this window: the oldest release in it less the
+	// grace. It guards releases whose own date could not be read.
+	since string
 }
 
 // readWindow reads the newest MaxTracks releases of all lists of both sites, newest first, and no page more:
@@ -321,8 +326,32 @@ func readWindow(ctx context.Context, hc *http.Client, cfg config.Config, quick b
 	}
 	emit.Logf(i18n.T("Die neuesten %d Releases (Limit %d) aus %d Listen, %d Seiten gelesen", "The newest %d releases (limit %d) from %d lists, %d pages read"), len(tracks), cfg.MaxTracks, len(feeds), pages)
 	w.tracks = tracks
+	w.since = sinceOf(tracks, w.hardtunes, c)
 	w.checkHealth(feeds, undated, emit)
 	return w, nil
+}
+
+// sinceOf is the oldest day a Spotify track may have for a release of this window: the oldest release in it,
+// less the grace the dates of the two sides may be apart. Releases without a date of their own are held to it,
+// so a track from years ago cannot slip in when a release page could not be read.
+func sinceOf(tracks []hardstyle.Track, ht map[string]hardtunes.Track, c *cache.Cache) string {
+	oldest := ""
+	for _, t := range tracks {
+		d := ""
+		if x, ok := ht[t.Path]; ok {
+			d = x.Date
+		} else if e, ok := c.Entry(t); ok {
+			d = e.Date
+		}
+		if d != "" && (oldest == "" || d < oldest) {
+			oldest = d
+		}
+	}
+	day, err := time.Parse("2006-01-02", oldest)
+	if err != nil {
+		return ""
+	}
+	return day.AddDate(0, 0, -match.GraceDays).Format("2006-01-02")
 }
 
 // warn notes something that looked wrong: in the log now, and in the summary of the run.

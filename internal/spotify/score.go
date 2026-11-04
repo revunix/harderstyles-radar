@@ -67,6 +67,29 @@ type scored struct {
 	pos      int // where the search answers named it
 }
 
+// dateFits says whether the release date of a Spotify track may belong to a release: within the tolerance of
+// the site's date, or (false, but within the grace) a little off. When the release page named no date, only
+// MatchOptions.Since keeps tracks from years ago out.
+func dateFits(siteDate, spDate, precision string, o MatchOptions) (ok bool, diff int) {
+	ok, diff = match.Date(siteDate, spDate, precision, o.Tolerance)
+	if siteDate == "" && o.Since != "" && spDate != "" && beforeDay(spDate, o.Since) {
+		return false, diff
+	}
+	return ok, diff
+}
+
+// beforeDay tells whether a Spotify date ("2026-10-29", "2026-10" or "2026") lies before a day, to the
+// precision it has.
+func beforeDay(spDate, day string) bool {
+	switch len(spDate) {
+	case 4:
+		return spDate < day[:4]
+	case 7:
+		return len(day) >= 7 && spDate < day[:7]
+	}
+	return spDate < day
+}
+
 // Score tells how well a Spotify track fits a release: Kind is how the titles compare, Diff the days between
 // the dates (as match.Date counts them), Score the sum of the weights above. A track whose title or artist does
 // not fit still gets a score, so the tracks of a search can be ranked; Decide does not take it.
@@ -110,7 +133,7 @@ func score(t hardstyle.Track, d hardstyle.Details, c Track, o MatchOptions) scor
 		s.Score -= weightFormatClash
 	}
 
-	ok, diff := match.Date(d.Date, c.ReleaseDate, c.DatePrecision, o.Tolerance)
+	ok, diff := dateFits(d.Date, c.ReleaseDate, c.DatePrecision, o)
 	s.Diff = diff
 	s.dateOK = ok || (diff > o.Tolerance && diff <= match.GraceDays)
 	switch {
