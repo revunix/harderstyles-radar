@@ -177,3 +177,69 @@ func TestRunSearchesOnlyTheNewestMaxTracks(t *testing.T) {
 			site.count("list"), site.count("detail"))
 	}
 }
+
+func TestRunReadsOnUntilTheTracksFillMaxTracks(t *testing.T) {
+	site := &fakeSite{tracks: siteTracks(9)}
+	srv := site.start(t)
+	f := &fakeSpotify{missing: map[string]bool{"T2": true}}
+	sp := newFakeClient(t, f)
+	sp.SetDelay(0)
+	_, path := newCache(t)
+	cfg := config.Config{PlaylistID: "p", Genres: []string{hardstyle.AnyGenre}, Pages: 10, MaxTracks: 4,
+		MaxSearches: 100, DateTolerance: 14, CacheFile: path, Description: descriptionOff, Order: config.OrderNewest}
+
+	for range 2 {
+		if _, err := Run(context.Background(), srv.Client(), sp, cfg, false, false, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The first run learns that Spotify lacks T2; the second takes one release more to make up for it.
+	if want := []string{"T1", "T3", "T4", "T5"}; !slices.Equal(f.titles(), want) {
+		t.Errorf("playlist %v, want %v", f.titles(), want)
+	}
+}
+
+func TestCheckForNewTracksBuildsThePlaylistFromTheWholeWindow(t *testing.T) {
+	dates := map[string]string{"N": "2026-10-31", "B1": "2026-10-30", "B2": "2026-10-30", "B3": "2026-10-29",
+		"B4": "2026-10-28", "B5": "2026-10-27", "S1": "2026-09-01", "S2": "2026-08-01"}
+	list := func(titles ...string) []hardstyle.Track {
+		var out []hardstyle.Track
+		for _, title := range titles {
+			out = append(out, hardstyle.Track{ID: "id" + title, Title: title, Artist: "A"})
+		}
+		return out
+	}
+	site := &fakeSite{
+		genres: map[string][]hardstyle.Track{"Busy": list("B1", "B2", "B3", "B4", "B5"), "Slow": list("S1", "S2")},
+		dates:  map[string]hardstyle.Details{},
+	}
+	for title, d := range dates {
+		site.dates["id"+title] = hardstyle.Details{Date: d}
+	}
+	srv := site.start(t)
+	f := &fakeSpotify{dates: dates}
+	sp := newFakeClient(t, f)
+	sp.SetDelay(0)
+	_, path := newCache(t)
+	cfg := config.Config{PlaylistID: "p", Genres: []string{"Busy", "Slow"}, Pages: 10, MaxTracks: 4,
+		MaxSearches: 100, DateTolerance: 14, CacheFile: path, Description: descriptionOff, Order: config.OrderNewest}
+
+	if _, err := Run(context.Background(), srv.Client(), sp, cfg, false, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"B1", "B2", "B3", "B4"}; !slices.Equal(f.titles(), want) {
+		t.Fatalf("full run: playlist %v, want %v", f.titles(), want)
+	}
+
+	// A new release on the busy list. The check reads its first page only, and all of the quiet list, whose
+	// releases are much older; the playlist must still hold the newest four, not the old S1 instead of B3.
+	site.mu.Lock()
+	site.genres["Busy"] = list("N", "B1", "B2", "B3", "B4", "B5")
+	site.mu.Unlock()
+	if _, err := Run(context.Background(), srv.Client(), sp, cfg, false, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"N", "B1", "B2", "B3"}; !slices.Equal(f.titles(), want) {
+		t.Errorf("after the check: playlist %v, want %v", f.titles(), want)
+	}
+}

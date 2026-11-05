@@ -299,10 +299,12 @@ func mustSync(t *testing.T, sp *spotify.Client, releases []hardstyle.Track, o Op
 	return res
 }
 
-// fakeSite is a small hardstyle.com: a list of tracks with 3 per page, and a detail page for each.
+// fakeSite is a small hardstyle.com: a list of tracks with 3 per page, and a detail page for each. With genres,
+// the list of a genre filter is its own.
 type fakeSite struct {
 	mu     sync.Mutex
 	tracks []hardstyle.Track
+	genres map[string][]hardstyle.Track
 	hits   map[string]int
 	dates  map[string]hardstyle.Details
 }
@@ -328,6 +330,9 @@ func (s *fakeSite) start(t *testing.T) *httptest.Server {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		tracks := append([]hardstyle.Track(nil), s.tracks...)
+		if g := r.URL.Query().Get("genre"); s.genres != nil && g != "" {
+			tracks = append([]hardstyle.Track(nil), s.genres[g]...)
+		}
 		s.mu.Unlock()
 		if r.URL.Path == "/en/tracks" {
 			s.hit("list")

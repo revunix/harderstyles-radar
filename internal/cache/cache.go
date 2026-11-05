@@ -149,7 +149,7 @@ type Cache struct {
 
 // Load reads the cache file. A missing or unreadable file is an empty cache.
 func Load(path string) (*Cache, error) {
-	c := &Cache{path: path, f: cacheFile{Version: cacheVersion, Tracks: map[string]Entry{}}}
+	c := &Cache{path: path, f: cacheFile{Version: cacheVersion, Matcher: matcherVersion, Tracks: map[string]Entry{}}}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return c, nil

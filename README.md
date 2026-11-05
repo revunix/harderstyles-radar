@@ -2,8 +2,8 @@
 
 A single Go binary that keeps a Spotify playlist in sync with the latest hardstyle releases on
 [hardstyle.com](https://hardstyle.com) and [hardtunes.com](https://www.hardtunes.com). It reads the newest
-`MAX_TRACKS` releases (default 500) of the track lists of both sites, finds them on Spotify and writes the
-playlist, newest first or sorted as `PLAYLIST_ORDER` says. A new release pushes the oldest out.
+releases of the track lists of both sites, enough to fill `MAX_TRACKS` tracks (default 500), finds them on Spotify
+and writes the playlist, newest first or sorted as `PLAYLIST_ORDER` says. A new release pushes the oldest out.
 
 The tool runs as an interactive terminal UI (TUI) or as a plain command for cron and service use. It remembers what
 it has already looked up, so a daily run only searches the new releases. A service mode checks the site every 15
@@ -12,8 +12,9 @@ minutes and touches Spotify only when something new appeared.
 ## Features
 
 - **Only the newest `MAX_TRACKS`** — the lists of all genres of both sites are merged by release date and read
-  page by page only as far as the newest `MAX_TRACKS` releases reach; only those are looked up on Spotify. A new
-  release pushes the oldest out, of the search as of the playlist.
+  page by page only as far as the newest `MAX_TRACKS` releases reach, plus one more release for every one that
+  Spotify does not have, so the playlist fills up; only those are looked up on Spotify. A new release pushes the
+  oldest out, of the search as of the playlist.
 - **Your order** — newest first (default), oldest first, by artist or by title (`PLAYLIST_ORDER`). Checked on
   every start and corrected when needed.
 - **Finds the right track** — ISRC first, then a score of title, artists, track length, version and date. The
@@ -138,9 +139,9 @@ precedence over the file. `.env` is listed in `.gitignore`.
 | `SPOTIFY_CLIENT_ID_2` / `_SECRET_2` / `_REFRESH_TOKEN_2` (then `_3` …) | no | | Fallback app that takes over when Spotify blocks the first one. Get the token with `-auth -auth-slot 2` |
 | `SPOTIFY_PLAYLIST_ID` | yes | | Target playlist |
 | `GENRES` | no | `Hardstyle` | `any` = the general list, whatever the genre; `all` = every genre separately; or comma-separated: `Hardstyle,Hardcore,Uptempo,Frenchcore,Freestyle,Hard Dance,Hard Techno,UK/Happy Hardcore` |
-| `PAGES` | no | enough for `MAX_TRACKS` from one list (`MAX_TRACKS`/20); `2` for `-compare` | The most pages a run may read of one list. A run reads only as far as the newest `MAX_TRACKS` releases of all lists reach, so this is a safety cap; `-compare` reads this many pages of every list |
+| `PAGES` | no | enough for `MAX_TRACKS` from one list (`MAX_TRACKS`/20); `2` for `-compare` | The most pages a run may read of one list. A run reads only as far as the releases it needs reach, so this is a safety cap; `-compare` reads this many pages of every list |
 | `HARDTUNES_GENRES` | no | all six: `hardstyle,hardcore,terror,frenchcore,early-rave,hard-techno` | Genre lists of hardtunes.com read by every run and by `-compare`: `https://www.hardtunes.com/<genre>/page/1/`; `none` switches the second source off |
-| `MAX_TRACKS` | no | `500` | The newest this many releases are read and looked up; the playlist holds at most this many tracks |
+| `MAX_TRACKS` | no | `500` | The playlist holds at most this many tracks. The newest this many releases are read and looked up, and one more for every release Spotify does not have, so the playlist fills up |
 | `PLAYLIST_ORDER` | no | `newest` | `newest` (release date, newest first), `oldest` (newest at the end), `artist` or `title`. The newest `MAX_TRACKS` are kept whatever the order |
 | `GENRE_MIN` | no | `0` | Every genre keeps at least its newest this many releases, however busy the other genres are (e.g. `10` keeps Terror and Uptempo in a playlist full of Hardstyle); `0` = only the release date counts |
 | `EVAL_SAMPLES` | no | `5` | Per run, this many releases the ISRC found are also searched by title, so `-evaluate` can measure the title matching against the ISRC's answer. Each costs one or two extra Spotify searches; `0` = off |
@@ -217,8 +218,9 @@ track. Both start a run straight away. They do nothing while a run is going.
 With `WATCH_INTERVAL=15m` (or `-watch 15m`) the tool runs as a service. The first run is a full one, after that a
 **check** follows every 15 minutes: it reads each list page by page only until a page contains a known release (so
 an album spread over several pages is picked up too). If there is nothing new, **no request at all goes to
-Spotify**. If there is something new, only those tracks are searched and inserted; the oldest drop out at the end,
-as with any run. Tracks that were not found are re-checked after 12 hours.
+Spotify**. If there is something new, the check reads the lists as far as a full run does, so the playlist is
+built from all the newest releases, not just from the first pages; only the new tracks are searched and inserted,
+the oldest drop out at the end, as with any run. Tracks that were not found are re-checked after 12 hours.
 With `-every 24h` there is additionally one full run per day.
 
 In the UI, the “Playlist” box shows the countdown (“in 00:14:32 · new tracks”). Without the UI, service
@@ -293,7 +295,8 @@ can be judged by numbers instead of by feel. The numbers grow with every run.
 ## How the playlist stays up to date
 
 - **Which releases:** The newest `MAX_TRACKS` releases of all lists of both sites (with `GENRE_MIN`, every genre's
-  newest come first). The lists are sorted newest first, so the tool merges them by release date and reads only as
+  newest come first), and one older release more for every one that Spotify does not have, so the tracks can fill
+  `MAX_TRACKS`. The lists are sorted newest first, so the tool merges them by release date and reads only as
   many pages as that needs. hardstyle.com names the date on the release page (read once, then kept in the cache).
   hardtunes.com names fresh releases by day and older ones only by week in its list; the tune page names the day,
   and once known it is kept. A release on both sites (same artists, title and version in any spelling, or the

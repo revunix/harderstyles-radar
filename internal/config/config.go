@@ -123,7 +123,7 @@ func load(needRefresh, needSpotify bool) (Config, error) {
 		}
 	}
 	if c.Pages == 0 {
-		// A run reads each list only as far as the newest MAX_TRACKS releases of all lists need, so PAGES is only
+		// A run reads each list only as far as the releases it needs of all lists reach, so PAGES is only
 		// the most it may read of one list: enough for MAX_TRACKS from that list alone (hardtunes.com shows 20 per
 		// page). -compare reads every page it may, so it keeps to a short look.
 		c.Pages = (c.MaxTracks + 19) / 20

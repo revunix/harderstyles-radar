@@ -94,7 +94,8 @@ func rememberWarnings(w []string) {
 //
 // A quick run is the check for new tracks that a service makes every few minutes: it reads the list only as far
 // as the first page that has a release it knows, and does nothing, not even one Spotify request, when there is
-// nothing new. A full run reads all pages of the setting.
+// nothing new. When there is, it reads the whole window like a full run before it touches the playlist. A full
+// run reads all pages of the setting.
 func run(ctx context.Context, hc *http.Client, sp *spotify.Client, cfg config.Config, dryRun, quick bool, emit event.Emit) (Result, error) {
 	c, err := cache.Load(cfg.CacheFile)
 	if err != nil {
@@ -137,7 +138,6 @@ func run(ctx context.Context, hc *http.Client, sp *spotify.Client, cfg config.Co
 	if len(releases.tracks) == 0 {
 		return Result{Warnings: releases.warnings}, errors.New(i18n.T("keine Releases auf hardstyle.com oder hardtunes.com gefunden", "no releases found on hardstyle.com or hardtunes.com"))
 	}
-	htByPath := releases.hardtunes
 
 	if quick {
 		fresh, due := countWork(releases.tracks, c)
@@ -148,7 +148,15 @@ func run(ctx context.Context, hc *http.Client, sp *spotify.Client, cfg config.Co
 			return Result{Scraped: len(releases.tracks), Warnings: releases.warnings}, nil
 		}
 		emit.Logf(i18n.T("%d neue und %d erneut zu prüfende Tracks gefunden", "%d new and %d to check again found"), fresh, due)
+		// The check read only the first page of every list. The playlist is built from the whole window: from a
+		// part of it the releases of the pages after the first would stand at the end and drop out first, the
+		// old releases on the first page of a quiet list would come in, and the next full run would turn it all
+		// back.
+		if releases, err = readWindow(ctx, hc, cfg, false, c, emit); err != nil {
+			return Result{}, err
+		}
 	}
+	htByPath := releases.hardtunes
 
 	hsDetails := hardstyle.NewDetailFetcher(hc, hardstyle.DetailDelay)
 	htDetails := hardtunes.NewDetailFetcher(hc, hardtunes.DetailDelay)
@@ -199,12 +207,14 @@ type window struct {
 	since string
 }
 
-// readWindow reads the newest MaxTracks releases of all lists of both sites, newest first, and no page more:
-// the lists are read page by page, only as far as the newest releases reach. A new release pushes the oldest
-// out of the window, like it pushes the oldest track out of the playlist. The release dates of hardstyle.com
-// are on its release pages; they are read once and kept in the cache. A check for new tracks (quick) reads a
-// list only up to the first page with a release it knows. A list that cannot be read is left out of this run
-// with a warning; the run fails only when no list can be read.
+// readWindow reads the newest releases of all lists of both sites, newest first, and no page more: the lists are
+// read page by page, only as far as the newest releases reach. It takes MaxTracks releases, and more as long as
+// the cache says that the tracks of those cannot fill the playlist (releases Spotify does not have). A new
+// release pushes the oldest out of the window, like it pushes the oldest track out of the playlist. The release
+// dates of hardstyle.com are on its release pages; they are read once and kept in the cache. A check for new
+// tracks (quick) reads a list only up to the first page with a release it knows, and takes no more than
+// MaxTracks. A list that cannot be read is left out of this run with a warning; the run fails only when no list
+// can be read.
 func readWindow(ctx context.Context, hc *http.Client, cfg config.Config, quick bool, c *cache.Cache, emit event.Emit) (window, error) {
 	w := window{hardtunes: map[string]hardtunes.Track{}, detailsRead: map[string]bool{}}
 	var stopAt func(hardstyle.Track) bool
@@ -298,7 +308,7 @@ func readWindow(ctx context.Context, hc *http.Client, cfg config.Config, quick b
 		return d.Date
 	}
 	emit.Send(event.Event{Kind: event.EvPhase, Phase: event.PhaseFetch, Done: 0, Total: cfg.MaxTracks})
-	tracks, err := newestReleases(ctx, feeds, windowOptions{
+	o := windowOptions{
 		limit:       cfg.MaxTracks,
 		minPerGenre: cfg.GenreMin,
 		dateOf:      dateOf,
@@ -307,9 +317,22 @@ func readWindow(ctx context.Context, hc *http.Client, cfg config.Config, quick b
 			return e.ISRC
 		},
 		progress: func(taken int) {
-			emit.Send(event.Event{Kind: event.EvPhase, Phase: event.PhaseFetch, Done: taken, Total: cfg.MaxTracks})
+			emit.Send(event.Event{Kind: event.EvPhase, Phase: event.PhaseFetch, Done: taken, Total: max(taken, cfg.MaxTracks)})
 		},
-	})
+	}
+	if !quick {
+		o.tracksOf = func(t hardstyle.Track) ([]string, bool) {
+			e, ok := c.Entry(t)
+			switch {
+			case e.URI != "":
+				return append([]string{e.URI}, e.Extra...), true
+			case ok && !e.At.IsZero():
+				return nil, true // looked up, Spotify does not have it
+			}
+			return nil, false
+		}
+	}
+	tracks, err := newestReleases(ctx, feeds, o)
 	if saveErr := c.Save(); saveErr != nil {
 		emit.Logf(i18n.T("Zwischenspeicher nicht gespeichert: %v", "Cache not saved: %v"), saveErr)
 	}

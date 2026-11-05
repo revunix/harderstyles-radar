@@ -88,6 +88,11 @@ type windowOptions struct {
 	// isrcOf gives the ISRC of a release when it is known already ("" else): the surest sign that two
 	// entries are the same recording.
 	isrcOf func(hardstyle.Track) string
+	// tracksOf tells the Spotify tracks a release has, as far as it is known (known false: not looked up yet).
+	// With it the window takes more than limit releases, until their tracks can fill limit: the releases Spotify
+	// does not have would leave the playlist short. A release not looked up yet counts as one track. nil = limit
+	// releases.
+	tracksOf func(hardstyle.Track) (uris []string, known bool)
 	// progress is told the number of releases taken so far; nil = no report.
 	progress func(taken int)
 }
@@ -172,12 +177,31 @@ func (m *merge) find(keys []string) (int, bool) {
 	return 0, false
 }
 
-// newestReleases takes the newest o.limit releases of all feeds, newest first, reading no page more than that
-// needs. A release without a date is as new as the one before it in its list. A release that is already in the
-// window (same artists, title and version, or the same ISRC) is not taken twice; the copy from hardstyle.com
-// wins. With o.minPerGenre every genre gets its newest releases first. For equal dates the earlier feed comes
-// first. A list that cannot be read is left out (its feed keeps the error); only when no list can be read at
-// all the window fails.
+// tracks counts the tracks the releases taken so far are expected to give, every Spotify track once.
+func (m *merge) tracks() int {
+	n, seen := 0, map[string]bool{}
+	for _, t := range m.out {
+		uris, known := m.o.tracksOf(t)
+		if !known {
+			n++
+			continue
+		}
+		for _, u := range uris {
+			if !seen[u] {
+				seen[u] = true
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// newestReleases takes the newest o.limit releases of all feeds (more with o.tracksOf), newest first, reading no
+// page more than that needs. A release without a date is as new as the one before it in its list. A release that
+// is already in the window (same artists, title and version, or the same ISRC) is not taken twice; the copy from
+// hardstyle.com wins. With o.minPerGenre every genre gets its newest releases first. For equal dates the earlier
+// feed comes first. A list that cannot be read is left out (its feed keeps the error); only when no list can be
+// read at all the window fails.
 func newestReleases(ctx context.Context, feeds []*feed, o windowOptions) ([]hardstyle.Track, error) {
 	m := &merge{o: o, at: map[string]int{}}
 	if o.minPerGenre > 0 {
@@ -196,6 +220,17 @@ func newestReleases(ctx context.Context, feeds []*feed, o windowOptions) ([]hard
 	}
 	if err := m.take(ctx, feeds, o.limit); err != nil {
 		return nil, err
+	}
+	if o.tracksOf != nil {
+		for short := o.limit - m.tracks(); short > 0; short = o.limit - m.tracks() {
+			before := len(m.out)
+			if err := m.take(ctx, feeds, before+short); err != nil {
+				return nil, err
+			}
+			if len(m.out) == before {
+				break // every list is used up
+			}
+		}
 	}
 	var errs []error
 	for _, f := range feeds {
