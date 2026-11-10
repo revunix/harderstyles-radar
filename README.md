@@ -186,6 +186,8 @@ go run ./cmd/harderstyles-radar -compare      # compare hardstyle.com and hardtu
 | `-no-tui` | Plain log output instead of the interface |
 | `-compare` | Compare the releases of hardstyle.com and hardtunes.com with each other and exit (uses `GENRES`, `HARDTUNES_GENRES`, `PAGES`) |
 | `-evaluate` | Measure the Spotify matching offline on what the cache learned and exit (no Spotify needed, see below) |
+| `update` / `-update` | Check GitHub for a newer version and update the application binary |
+| `check-update` / `-check-update` | Check GitHub if a newer version is available and exit |
 
 Without a terminal (cron, pipe) or with `-no-tui`, only text output is produced.
 
@@ -206,6 +208,22 @@ Without a service schedule, a cron entry is enough, e.g. daily at 8:00:
 ```sh
 0 8 * * * cd /path && ./harderstyles-radar
 ```
+
+## Updating to a new version
+
+Check GitHub for updates or update directly:
+
+```sh
+./harderstyles-radar check-update   # or: ./harderstyles-radar --check-update
+./harderstyles-radar update         # or: ./harderstyles-radar --update
+```
+
+Options for `update`:
+- `-check`: check for updates without installing
+- `-force`: reinstall or update even if already on the latest version
+- `-lang <de|en>`: language of updater output
+
+The updater queries the GitHub Releases API, downloads the archive for your operating system and CPU architecture, verifies the SHA-256 checksum from `checksums.txt`, and replaces the running binary.
 
 ## Correcting a wrong match
 

@@ -464,3 +464,15 @@ func TestAppsLine(t *testing.T) {
 		t.Errorf("all blocked: %q", got)
 	}
 }
+
+func TestUpdateNotification(t *testing.T) {
+	m := newModel(context.Background(), Options{Genres: testGenres, MaxTracks: 500})
+	m.Update(updateMsg("v2.0.0"))
+	if m.newVersion != "v2.0.0" {
+		t.Errorf("got newVersion %q, want v2.0.0", m.newVersion)
+	}
+	head := strings.Join(m.header(), "\n")
+	if !strings.Contains(head, "Update: v2.0.0") {
+		t.Errorf("expected header to contain 'Update: v2.0.0', got:\n%s", head)
+	}
+}

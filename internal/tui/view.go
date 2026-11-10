@@ -145,6 +145,14 @@ func (m *model) header() []string {
 	if m.dryRun {
 		status = i18n.T("Testlauf", "Dry run")
 	}
+	if m.newVersion != "" {
+		note := "Update: " + m.newVersion
+		if status != "" {
+			status += " · " + note
+		} else {
+			status = note
+		}
+	}
 	count := fmt.Sprintf(i18n.T("%d Releases", "%d releases"), len(m.items))
 	head := renderHeader(m.width-2*textInset, mark, steps, status, count, m.now.Format("15:04:05"))
 	// The text has a little room at the sides, the rule below it goes all the way.

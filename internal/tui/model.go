@@ -47,6 +47,8 @@ type Options struct {
 	// Correct records a correction for one release: "retry" looks it up again, "skip" refuses the Spotify
 	// track in uri for good. Nil hides the keys.
 	Correct func(id, action, uri string) error
+	// CheckUpdate checks GitHub for a newer version in the background; nil skips the check.
+	CheckUpdate func(ctx context.Context) (string, error)
 }
 
 type item struct {
@@ -64,9 +66,10 @@ type logLine struct {
 }
 
 type (
-	tickMsg  time.Time
-	eventMsg event.Event
-	doneMsg  struct {
+	tickMsg   time.Time
+	eventMsg  event.Event
+	updateMsg string
+	doneMsg   struct {
 		res sync.Result
 		err error
 	}
@@ -119,6 +122,7 @@ type model struct {
 	splashFrame int
 	splashScene *splashScene
 	splashSize  [2]int // the window the logo was drawn for
+	newVersion  string
 }
 
 func newModel(ctx context.Context, opts Options) *model {
@@ -129,6 +133,19 @@ func (m *model) Init() tea.Cmd {
 	cmds := []tea.Cmd{tea.Tick(tickRate, func(t time.Time) tea.Msg { return tickMsg(t) }), m.startRun(false)}
 	if m.splash {
 		cmds = append(cmds, splashCmds())
+	}
+	if m.opts.CheckUpdate != nil {
+		checkFn := m.opts.CheckUpdate
+		ctx := m.ctx
+		cmds = append(cmds, func() tea.Msg {
+			ctxCheck, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			ver, err := checkFn(ctxCheck)
+			if err != nil || ver == "" {
+				return nil
+			}
+			return updateMsg(ver)
+		})
 	}
 	return tea.Batch(cmds...)
 }
@@ -203,6 +220,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(next, m.startRun(m.nextQuick))
 		}
 		return m, next
+	case updateMsg:
+		m.newVersion = string(msg)
+		m.addLog(fmt.Sprintf(i18n.T("Neue Version %s verfügbar! Aktualisieren mit 'harderstyles-radar update'", "New version %s available! Update with 'harderstyles-radar update'"), string(msg)), false)
 	case eventMsg:
 		m.handleEvent(event.Event(msg))
 	case doneMsg:

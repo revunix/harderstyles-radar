@@ -423,7 +423,13 @@ func (m *model) splashLines() []string {
 	}
 	content := scene.lines(seconds)
 	content = append(content, "", splashBars(scene.width, seconds), "",
-		theme.Muted.Render("v"+Version+" · ")+brand(hsInk).Render("hardstyle.com")+theme.Muted.Render(" → ")+brand(spGreen).Render("Spotify"),
+		func() string {
+		vLine := theme.Muted.Render("v"+Version+" · ") + brand(hsInk).Render("hardstyle.com") + theme.Muted.Render(" → ") + brand(spGreen).Render("Spotify")
+		if m.newVersion != "" {
+			vLine += theme.Accent.Render(" · Update: " + m.newVersion)
+		}
+		return vLine
+	}(),
 		theme.Subtle.Render(string([]rune(spinnerChars)[m.splashFrame%len([]rune(spinnerChars))])+" "+i18n.T("starte … (Taste überspringt)", "starting … (any key skips)")),
 	)
 

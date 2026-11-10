@@ -28,12 +28,62 @@ import (
 	"hardstylesync/internal/spotify"
 	"hardstylesync/internal/sync"
 	"hardstylesync/internal/tui"
+	"hardstylesync/internal/updater"
 )
 
 // version is set through -ldflags.
 var version = "1.2.4"
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "update":
+			updateCmd := flag.NewFlagSet("update", flag.ExitOnError)
+			checkOnly := updateCmd.Bool("check", false, "only check for updates without applying")
+			force := updateCmd.Bool("force", false, "force update even if version is up to date")
+			lang := updateCmd.String("lang", "", "language of the messages: de or en (default: UI_LANGUAGE, else de)")
+			_ = updateCmd.Parse(os.Args[2:])
+
+			envFile := os.Getenv("ENV_FILE")
+			if envFile == "" {
+				envFile = ".env"
+			}
+			_ = config.LoadDotEnv(envFile)
+			langName := *lang
+			if langName == "" {
+				langName = os.Getenv("UI_LANGUAGE")
+			}
+			_ = i18n.SetLanguage(langName)
+
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			httpClient := &http.Client{Timeout: 60 * time.Second}
+			runUpdate(ctx, httpClient, version, *checkOnly, *force)
+			return
+
+		case "check-update":
+			checkCmd := flag.NewFlagSet("check-update", flag.ExitOnError)
+			lang := checkCmd.String("lang", "", "language of the messages: de or en (default: UI_LANGUAGE, else de)")
+			_ = checkCmd.Parse(os.Args[2:])
+
+			envFile := os.Getenv("ENV_FILE")
+			if envFile == "" {
+				envFile = ".env"
+			}
+			_ = config.LoadDotEnv(envFile)
+			langName := *lang
+			if langName == "" {
+				langName = os.Getenv("UI_LANGUAGE")
+			}
+			_ = i18n.SetLanguage(langName)
+
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			httpClient := &http.Client{Timeout: 30 * time.Second}
+			runUpdate(ctx, httpClient, version, true, false)
+			return
+		}
+	}
 	auth := flag.Bool("auth", false, "log in to Spotify once and print the refresh token")
 	slot := flag.Int("auth-slot", 1, "with -auth: log in for fallback app number N (SPOTIFY_CLIENT_ID_N), 1 = the main app")
 	status := flag.Bool("status", false, "show the configured Spotify apps, their blocks and whether their refresh tokens still work")
@@ -47,7 +97,29 @@ func main() {
 	noTUI := flag.Bool("no-tui", false, "plain log output instead of the interface (always the case without a terminal)")
 	doCompare := flag.Bool("compare", false, "compare the releases of hardstyle.com and hardtunes.com with each other and exit (no Spotify needed)")
 	doEvaluate := flag.Bool("evaluate", false, "measure the Spotify matching offline on what the cache learned and exit (no Spotify needed)")
+	doUpdate := flag.Bool("update", false, "check for updates and update harderstyles-radar")
+	doCheckUpdate := flag.Bool("check-update", false, "check if a new version is available and exit")
+	forceUpdate := flag.Bool("force", false, "with -update: force update even if version is up to date")
 	flag.Parse()
+
+	if *doUpdate || *doCheckUpdate {
+		envFile := os.Getenv("ENV_FILE")
+		if envFile == "" {
+			envFile = ".env"
+		}
+		_ = config.LoadDotEnv(envFile)
+		name := *lang
+		if name == "" {
+			name = os.Getenv("UI_LANGUAGE")
+		}
+		_ = i18n.SetLanguage(name)
+
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		httpClient := &http.Client{Timeout: 60 * time.Second}
+		runUpdate(ctx, httpClient, version, *doCheckUpdate, *forceUpdate)
+		return
+	}
 	envFile := os.Getenv("ENV_FILE")
 	if envFile == "" {
 		envFile = ".env"
@@ -160,6 +232,16 @@ func main() {
 		if err := tui.Run(ctx, tui.Options{
 			Genres: uiGenres(cfg), MaxTracks: cfg.MaxTracks, DryRun: *dryRun, Every: *every, Watch: cfg.WatchInterval, At: *at, Timezone: scheduleLocation,
 			MaxSearches: cfg.MaxSearches, Apps: sp.Apps, RequestDelay: cfg.RequestDelay, ContinueDelay: cfg.ContinueDelay,
+			CheckUpdate: func(ctx context.Context) (string, error) {
+				res, err := updater.Check(ctx, httpClient, version)
+				if err != nil {
+					return "", err
+				}
+				if res.UpdateAvailable {
+					return res.LatestVersion, nil
+				}
+				return "", nil
+			},
 			Run: func(ctx context.Context, dryRun, quick bool, emit event.Emit) (sync.Result, error) {
 				return sync.Run(ctx, httpClient, sp, cfg, dryRun, quick, emit)
 			},
@@ -173,6 +255,15 @@ func main() {
 	}
 	// Without the interface: once and out (cron), or as a service that carries on by itself: with -every it does
 	// a full sync now and then, with -watch (or WATCH_INTERVAL) it also checks for new tracks all the time.
+	go func() {
+		ctxCheck, cancelCheck := context.WithTimeout(ctx, 5*time.Second)
+		defer cancelCheck()
+		check, err := updater.Check(ctxCheck, httpClient, version)
+		if err == nil && check.UpdateAvailable {
+			log.Printf(i18n.T("Hinweis: Neue Version %s verfügbar (aktuell: v%s). Aktualisieren mit 'harderstyles-radar update' oder '--update'", "Notice: New version %s available (current: v%s). Update with 'harderstyles-radar update' or '--update'"), check.LatestVersion, version)
+		}
+	}()
+
 	service := *every > 0 || *watch > 0 || *at != ""
 	sched := sync.Schedule{Every: *every, Watch: cfg.WatchInterval, Continue: cfg.ContinueDelay, DryRun: *dryRun, At: *at, Location: scheduleLocation}
 	if !service {
@@ -290,4 +381,35 @@ func printStatus(ctx context.Context, hc *http.Client, cfg config.Config) bool {
 	fmt.Println(i18n.T("\nEine Restlaufzeit des Refresh-Tokens nennt Spotify nicht, die Prüfung oben zeigt nur, ob er jetzt geht.\nUngültig wird er, wenn der Zugriff entzogen wird (spotify.com/account/apps) oder die App im Dashboard\ndas Konto aus der User-Liste verliert.",
 		"\nSpotify does not give a remaining lifetime for refresh tokens, the check above only shows whether it works now.\nIt stops working when access is revoked (spotify.com/account/apps) or the app loses the account\nfrom its user list in the dashboard."))
 	return ok
+}
+
+func runUpdate(ctx context.Context, hc *http.Client, currentVersion string, checkOnly, force bool) {
+	fmt.Printf(i18n.T("Prüfe GitHub auf Updates (aktuell: v%s) …\n", "Checking GitHub for updates (current: v%s) …\n"), currentVersion)
+	check, err := updater.Check(ctx, hc, currentVersion)
+	if err != nil {
+		log.Fatalf("%s: %v", i18n.T("Update-Prüfung fehlgeschlagen", "update check failed"), err)
+	}
+
+	if !check.UpdateAvailable && !force {
+		fmt.Printf(i18n.T("harderstyles-radar ist bereits auf dem neuesten Stand (%s).\n", "harderstyles-radar is already up to date (%s).\n"), check.LatestVersion)
+		return
+	}
+
+	if check.UpdateAvailable {
+		fmt.Printf(i18n.T("Neue Version gefunden: %s (aktuell: v%s)\n", "New version found: %s (current: v%s)\n"), check.LatestVersion, currentVersion)
+	} else if force {
+		fmt.Printf(i18n.T("Erzwungene Aktualisierung auf %s (aktuell: v%s)\n", "Forced update to %s (current: v%s)\n"), check.LatestVersion, currentVersion)
+	}
+
+	if checkOnly {
+		fmt.Println(i18n.T("Führe 'harderstyles-radar update' oder '--update' aus, um zu aktualisieren.", "Run 'harderstyles-radar update' or '--update' to install the update."))
+		return
+	}
+
+	err = updater.ApplyUpdate(ctx, hc, "", check, func(status string) {
+		fmt.Println(">", status)
+	})
+	if err != nil {
+		log.Fatalf("%s: %v", i18n.T("Aktualisierung fehlgeschlagen", "update failed"), err)
+	}
 }
