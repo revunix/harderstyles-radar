@@ -32,7 +32,7 @@ import (
 )
 
 // version is set through -ldflags.
-var version = "1.2.5"
+var version = "1.2.6"
 
 func main() {
 	if len(os.Args) > 1 {
