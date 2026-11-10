@@ -19,6 +19,7 @@ import (
 	"hardstylesync/internal/event"
 	"hardstylesync/internal/hardstyle"
 	"hardstylesync/internal/i18n"
+	"hardstylesync/internal/updater"
 	"hardstylesync/internal/spotify"
 	"hardstylesync/internal/sync"
 )
@@ -465,14 +466,52 @@ func TestAppsLine(t *testing.T) {
 	}
 }
 
-func TestUpdateNotification(t *testing.T) {
+func TestUpdateNotificationAndPopup(t *testing.T) {
+	checkRes := &updater.CheckResult{
+		LatestVersion:   "v2.0.0",
+		UpdateAvailable: true,
+	}
 	m := newModel(context.Background(), Options{Genres: testGenres, MaxTracks: 500})
-	m.Update(updateMsg("v2.0.0"))
+	m.Update(updateMsg{check: checkRes})
 	if m.newVersion != "v2.0.0" {
 		t.Errorf("got newVersion %q, want v2.0.0", m.newVersion)
 	}
 	head := strings.Join(m.header(), "\n")
 	if !strings.Contains(head, "Update: v2.0.0") {
 		t.Errorf("expected header to contain 'Update: v2.0.0', got:\n%s", head)
+	}
+
+	if m.updatePopup == nil {
+		t.Fatalf("expected updatePopup to be open")
+	}
+	view := m.View()
+	if !strings.Contains(view, "Update verfügbar") || !strings.Contains(view, "v2.0.0") {
+		t.Errorf("expected popup in view, got:\n%s", view)
+	}
+
+	// Pressing esc closes the popup
+	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.updatePopup != nil {
+		t.Errorf("expected popup to be closed after esc")
+	}
+
+	// Opening it again and pressing u starts update
+	m.updatePopup = newUpdatePopup(checkRes)
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	if cmd == nil {
+		t.Errorf("expected cmd from pressing 'u'")
+	}
+	if !m.updatePopup.updating {
+		t.Errorf("expected updatePopup.updating to be true")
+	}
+
+	// Update done
+	m.Update(updateDoneMsg{err: nil})
+	if !m.updatePopup.done {
+		t.Errorf("expected updatePopup.done to be true")
+	}
+	viewDone := m.View()
+	if !strings.Contains(viewDone, "Erfolgreich") {
+		t.Errorf("expected success message in popup view, got:\n%s", viewDone)
 	}
 }

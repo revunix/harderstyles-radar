@@ -232,15 +232,18 @@ func main() {
 		if err := tui.Run(ctx, tui.Options{
 			Genres: uiGenres(cfg), MaxTracks: cfg.MaxTracks, DryRun: *dryRun, Every: *every, Watch: cfg.WatchInterval, At: *at, Timezone: scheduleLocation,
 			MaxSearches: cfg.MaxSearches, Apps: sp.Apps, RequestDelay: cfg.RequestDelay, ContinueDelay: cfg.ContinueDelay,
-			CheckUpdate: func(ctx context.Context) (string, error) {
+			CheckUpdate: func(ctx context.Context) (*updater.CheckResult, error) {
 				res, err := updater.Check(ctx, httpClient, version)
 				if err != nil {
-					return "", err
+					return nil, err
 				}
 				if res.UpdateAvailable {
-					return res.LatestVersion, nil
+					return res, nil
 				}
-				return "", nil
+				return nil, nil
+			},
+			ApplyUpdate: func(ctx context.Context, check *updater.CheckResult, status func(string)) error {
+				return updater.ApplyUpdate(ctx, httpClient, "", check, status)
 			},
 			Run: func(ctx context.Context, dryRun, quick bool, emit event.Emit) (sync.Result, error) {
 				return sync.Run(ctx, httpClient, sp, cfg, dryRun, quick, emit)

@@ -10,6 +10,7 @@ import (
 	"hardstylesync/internal/i18n"
 	"hardstylesync/internal/spotify"
 	"hardstylesync/internal/sync"
+	"hardstylesync/internal/updater"
 	"slices"
 	"time"
 
@@ -48,7 +49,9 @@ type Options struct {
 	// track in uri for good. Nil hides the keys.
 	Correct func(id, action, uri string) error
 	// CheckUpdate checks GitHub for a newer version in the background; nil skips the check.
-	CheckUpdate func(ctx context.Context) (string, error)
+	CheckUpdate func(ctx context.Context) (*updater.CheckResult, error)
+	// ApplyUpdate installs the downloaded release; nil uses updater.ApplyUpdate.
+	ApplyUpdate func(ctx context.Context, check *updater.CheckResult, status func(string)) error
 }
 
 type item struct {
@@ -66,10 +69,12 @@ type logLine struct {
 }
 
 type (
-	tickMsg   time.Time
-	eventMsg  event.Event
-	updateMsg string
-	doneMsg   struct {
+	tickMsg         time.Time
+	eventMsg        event.Event
+	updateMsg       struct{ check *updater.CheckResult }
+	updateStatusMsg string
+	updateDoneMsg   struct{ err error }
+	doneMsg         struct {
 		res sync.Result
 		err error
 	}
@@ -123,6 +128,8 @@ type model struct {
 	splashScene *splashScene
 	splashSize  [2]int // the window the logo was drawn for
 	newVersion  string
+	updateCheck *updater.CheckResult
+	updatePopup *updatePopup
 }
 
 func newModel(ctx context.Context, opts Options) *model {
@@ -140,11 +147,11 @@ func (m *model) Init() tea.Cmd {
 		cmds = append(cmds, func() tea.Msg {
 			ctxCheck, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
-			ver, err := checkFn(ctxCheck)
-			if err != nil || ver == "" {
+			res, err := checkFn(ctxCheck)
+			if err != nil || res == nil || !res.UpdateAvailable {
 				return nil
 			}
-			return updateMsg(ver)
+			return updateMsg{check: res}
 		})
 	}
 	return tea.Batch(cmds...)
@@ -221,8 +228,27 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, next
 	case updateMsg:
-		m.newVersion = string(msg)
-		m.addLog(fmt.Sprintf(i18n.T("Neue Version %s verfügbar! Aktualisieren mit 'harderstyles-radar update'", "New version %s available! Update with 'harderstyles-radar update'"), string(msg)), false)
+		m.newVersion = msg.check.LatestVersion
+		m.updateCheck = msg.check
+		m.addLog(fmt.Sprintf(i18n.T("Neue Version %s verfügbar! Aktualisieren mit 'harderstyles-radar update'", "New version %s available! Update with 'harderstyles-radar update'"), msg.check.LatestVersion), false)
+		if !m.splash && m.updatePopup == nil {
+			m.updatePopup = newUpdatePopup(msg.check)
+		}
+	case updateStatusMsg:
+		if m.updatePopup != nil {
+			m.updatePopup.status = string(msg)
+		}
+	case updateDoneMsg:
+		if m.updatePopup != nil {
+			m.updatePopup.updating = false
+			m.updatePopup.err = msg.err
+			m.updatePopup.done = (msg.err == nil)
+			if msg.err == nil {
+				m.addLog(fmt.Sprintf(i18n.T("Erfolgreich auf %s aktualisiert!", "Successfully updated to %s!"), m.newVersion), false)
+			} else {
+				m.addLog(fmt.Sprintf(i18n.T("Update fehlgeschlagen: %v", "Update failed: %v"), msg.err), true)
+			}
+		}
 	case eventMsg:
 		m.handleEvent(event.Event(msg))
 	case doneMsg:
@@ -235,6 +261,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case splashDoneMsg:
 		m.splash = false
+		if m.updateCheck != nil && m.updatePopup == nil {
+			m.updatePopup = newUpdatePopup(m.updateCheck)
+		}
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
 	case tea.KeyMsg:
@@ -309,6 +338,9 @@ func (m *model) finish(d doneMsg) {
 }
 
 func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.updatePopup != nil {
+		return m.handleUpdatePopupKey(msg)
+	}
 	if m.splash {
 		// Any key skips the intro, only quitting still quits.
 		m.splash = false
@@ -497,4 +529,52 @@ func (m *model) countdown() string {
 	}
 	d := max(0, m.nextRun.Sub(m.now))
 	return fmt.Sprintf("in %02d:%02d:%02d", int(d.Hours()), int(d.Minutes())%60, int(d.Seconds())%60)
+}
+
+func (m *model) handleUpdatePopupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	p := m.updatePopup
+	if p == nil {
+		return m, nil
+	}
+	if p.updating {
+		return m, nil
+	}
+	if p.done || p.err != nil {
+		switch msg.String() {
+		case "enter", "esc", "q", " ":
+			m.updatePopup = nil
+		}
+		return m, nil
+	}
+	switch msg.String() {
+	case "u", "enter", "y":
+		return m, m.startPopupUpdate()
+	case "esc", "q", "n":
+		m.updatePopup = nil
+	}
+	return m, nil
+}
+
+func (m *model) startPopupUpdate() tea.Cmd {
+	if m.updatePopup == nil || m.updateCheck == nil {
+		return nil
+	}
+	m.updatePopup.updating = true
+	m.updatePopup.status = i18n.T("Lade Release herunter …", "Downloading release …")
+	program := m.program
+	check := m.updateCheck
+	applyFn := m.opts.ApplyUpdate
+	return func() tea.Msg {
+		var err error
+		if applyFn != nil {
+			err = applyFn(context.Background(), check, func(st string) {
+				program.Send(updateStatusMsg(st))
+			})
+		} else {
+			err = updater.ApplyUpdate(context.Background(), nil, "", check, func(st string) {
+				program.Send(updateStatusMsg(st))
+			})
+		}
+		return updateDoneMsg{err: err}
+	}
 }

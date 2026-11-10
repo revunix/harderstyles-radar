@@ -7,6 +7,7 @@ import (
 
 	"hardstylesync/internal/corrections"
 	"hardstylesync/internal/i18n"
+	"hardstylesync/internal/updater"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
@@ -254,20 +255,31 @@ func (m *model) record(it item, action, uri string) {
 // overlay draws the window on top of the finished view. It works in cells, not bytes, so a styled line keeps
 // its place.
 func (m *model) overlay(view string) string {
-	p := m.menu
-	if p == nil {
-		return view
-	}
-	box := renderBox(p.w, p.h, "", theme.BoxActive, p.menuLines())
 	rows := strings.Split(view, "\n")
-	for i, line := range box {
-		y := p.y + i
-		if y < 0 || y >= len(rows) {
-			continue
+	if p := m.updatePopup; p != nil {
+		box := p.render()
+		x := max(0, (m.width-p.w)/2)
+		y := max(0, (m.height-p.h)/2)
+		for i, line := range box {
+			rowIdx := y + i
+			if rowIdx >= 0 && rowIdx < len(rows) {
+				rows[rowIdx] = splice(rows[rowIdx], x, line)
+			}
 		}
-		rows[y] = splice(rows[y], p.x, line)
+		return strings.Join(rows, "\n")
 	}
-	return strings.Join(rows, "\n")
+	if p := m.menu; p != nil {
+		box := renderBox(p.w, p.h, "", theme.BoxActive, p.menuLines())
+		for i, line := range box {
+			y := p.y + i
+			if y < 0 || y >= len(rows) {
+				continue
+			}
+			rows[y] = splice(rows[y], p.x, line)
+		}
+		return strings.Join(rows, "\n")
+	}
+	return view
 }
 
 // splice replaces the cells of a row from x on with a new piece, keeping the style of the rest.
@@ -275,4 +287,77 @@ func splice(row string, x int, piece string) string {
 	left := ansi.Cut(row, 0, x)
 	right := ansi.Cut(row, x+ansi.StringWidth(piece), ansi.StringWidth(row))
 	return left + piece + right
+}
+
+type updatePopup struct {
+	check    *updater.CheckResult
+	updating bool
+	status   string
+	err      error
+	done     bool
+	w, h     int
+}
+
+func newUpdatePopup(check *updater.CheckResult) *updatePopup {
+	return &updatePopup{
+		check: check,
+		w:     56,
+		h:     9,
+	}
+}
+
+func (p *updatePopup) render() []string {
+	title := i18n.T("Update verfügbar", "Update available")
+	if p.updating {
+		title = i18n.T("Aktualisierung", "Updating")
+	} else if p.done {
+		title = i18n.T("Update erfolgreich", "Update successful")
+	} else if p.err != nil {
+		title = i18n.T("Update-Fehler", "Update error")
+	}
+	return renderBox(p.w, p.h, title, theme.BoxActive, p.lines(p.w-4))
+}
+
+func (p *updatePopup) lines(width int) []string {
+	var lines []string
+	switch {
+	case p.done:
+		lines = append(lines,
+			theme.Success.Render(fmt.Sprintf(i18n.T("Erfolgreich auf %s aktualisiert!", "Successfully updated to %s!"), p.check.LatestVersion)),
+			"",
+			i18n.T("Bitte starte die App neu, um das Update zu nutzen.", "Please restart the app to use the update."),
+			"",
+			theme.AccentBold.Render("[Enter / Esc]")+" "+theme.Text.Render(i18n.T("Schließen", "Close")),
+		)
+	case p.err != nil:
+		lines = append(lines,
+			theme.Danger.Render(i18n.T("Aktualisierung fehlgeschlagen:", "Update failed:")),
+			"",
+			theme.Text.Render(fit(p.err.Error(), width-4)),
+			"",
+			theme.AccentBold.Render("[Esc]")+" "+theme.Text.Render(i18n.T("Schließen", "Close")),
+		)
+	case p.updating:
+		msg := p.status
+		if msg == "" {
+			msg = i18n.T("Wird aktualisiert …", "Updating …")
+		}
+		lines = append(lines,
+			theme.Accent.Render(i18n.T("Update wird installiert …", "Installing update …")),
+			"",
+			theme.Muted.Render(fit(msg, width-4)),
+			"",
+			theme.Subtle.Render(i18n.T("Bitte warten …", "Please wait …")),
+		)
+	default:
+		lines = append(lines,
+			fmt.Sprintf(i18n.T("Neue Version %s ist verfügbar!", "New version %s is available!"), theme.AccentBold.Render(p.check.LatestVersion)),
+			theme.Muted.Render(fmt.Sprintf(i18n.T("(Aktuell: v%s)", "(Current: v%s)"), Version)),
+			"",
+			i18n.T("Möchtest du jetzt direkt aktualisieren?", "Do you want to update now?"),
+			"",
+			theme.AccentBold.Render("[u / Enter]")+" "+theme.Text.Render(i18n.T("Jetzt aktualisieren", "Update now"))+"    "+theme.Muted.Render("[Esc] ")+theme.Muted.Render(i18n.T("Später", "Later")),
+		)
+	}
+	return lines
 }
