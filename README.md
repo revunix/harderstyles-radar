@@ -150,6 +150,9 @@ precedence over the file. `.env` is listed in `.gitignore`.
 | `MAX_SEARCHES` | no | `100` | At most this many Spotify searches per run |
 | `REQUEST_DELAY` | no | `800ms` | Pause between two Spotify requests |
 | `WATCH_INTERVAL` | no | `0` (off) | Service mode: check hardstyle.com for new tracks this often, e.g. `15m` (also `-watch 15m`) |
+| `SYNC_EVERY_MINUTES` | no | off | Run a full sync every this many minutes (also `-every-minutes`) |
+| `SYNC_AT` | no | off | Run a full sync daily at `HH:MM` (requires `SYNC_TIMEZONE`) |
+| `SYNC_TIMEZONE` | with `SYNC_AT` | | IANA time zone, e.g. `Europe/Berlin` |
 | `ALBUM_MIN_TRACKS` | no | `2` | From this many tracks sharing the same catalog number, the release counts as an album and all its tracks come from the same Spotify album; `0` turns it off |
 | `UI_LANGUAGE` | no | `de` | Language of the UI, the log and the messages: `de` or `en` (also `-lang en`) |
 | `NO_COLOR` | no | | Set to anything (or `TERM=dumb`) and the interface draws as plain text, without color. The layout stays the same |
@@ -176,6 +179,8 @@ go run ./cmd/harderstyles-radar -compare      # compare hardstyle.com and hardtu
 | `-status` | Show the configured Spotify apps, their blocks and whether their refresh tokens still work |
 | `-dry-run` | Show what would change without touching the playlist |
 | `-every <d>` | Keep running and do a full sync repeatedly, e.g. `24h` |
+| `-every-minutes <n>` | Keep running and do a full sync every `n` minutes |
+| `-at <HH:MM> -timezone <zone>` | Keep running and do a full sync every day at that local time, e.g. `-at 08:00 -timezone Europe/Berlin` |
 | `-watch <d>` | Service: check hardstyle.com for new tracks this often, e.g. `15m` (default: `WATCH_INTERVAL`) |
 | `-lang <l>` | Language of the UI and the messages: `de` or `en` |
 | `-no-tui` | Plain log output instead of the interface |
@@ -184,7 +189,19 @@ go run ./cmd/harderstyles-radar -compare      # compare hardstyle.com and hardtu
 
 Without a terminal (cron, pipe) or with `-no-tui`, only text output is produced.
 
-Without `-every`, a cron entry is enough, e.g. daily at 8:00:
+For a daily run at a fixed time, give the time zone explicitly:
+
+```sh
+./harderstyles-radar -at 08:00 -timezone Europe/Berlin
+```
+
+For an interval in minutes:
+
+```sh
+./harderstyles-radar -every-minutes 30
+```
+
+Without a service schedule, a cron entry is enough, e.g. daily at 8:00:
 
 ```sh
 0 8 * * * cd /path && ./harderstyles-radar

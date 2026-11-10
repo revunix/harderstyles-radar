@@ -33,7 +33,9 @@ type Options struct {
 	RequestDelay time.Duration
 	DryRun       bool
 	// Every is the pause between two complete runs; 0 runs only on request.
-	Every time.Duration
+	Every    time.Duration
+	At       string
+	Timezone *time.Location
 	// ContinueDelay is the pause before the next run when work is left over (search limit) or a run failed.
 	ContinueDelay time.Duration
 	// Watch is the pause between two checks for new tracks (the service); 0 switches the checks off.
@@ -279,7 +281,7 @@ func (m *model) finish(d doneMsg) {
 	if d.err == nil && !m.runQuick {
 		m.lastFull = m.lastRun
 	}
-	sched := sync.Schedule{Every: m.opts.Every, Watch: m.opts.Watch, Continue: m.opts.ContinueDelay, DryRun: m.dryRun}
+	sched := sync.Schedule{Every: m.opts.Every, Watch: m.opts.Watch, Continue: m.opts.ContinueDelay, DryRun: m.dryRun, At: m.opts.At, Location: m.opts.Timezone}
 	if wait, why, quick := sched.Next(d.res, d.err, m.failures, m.lastRun.Sub(m.lastFull)); wait > 0 {
 		m.nextRun, m.nextWhy, m.nextQuick = m.lastRun.Add(wait), why, quick
 		m.addLog(fmt.Sprintf(i18n.T("Nächster Lauf in %s (%s)", "Next run in %s (%s)"), i18n.Duration(wait), why), false)

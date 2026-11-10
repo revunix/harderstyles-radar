@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -30,7 +31,7 @@ import (
 )
 
 // version is set through -ldflags.
-var version = "1.2.3"
+var version = "1.2.4"
 
 func main() {
 	auth := flag.Bool("auth", false, "log in to Spotify once and print the refresh token")
@@ -38,17 +39,15 @@ func main() {
 	status := flag.Bool("status", false, "show the configured Spotify apps, their blocks and whether their refresh tokens still work")
 	dryRun := flag.Bool("dry-run", false, "show what would change without touching the playlist")
 	every := flag.Duration("every", 0, "keep running and do a full sync repeatedly, e.g. 24h (default: run once and exit)")
+	everyMinutes := flag.Int("every-minutes", 0, "keep running and do a full sync every N minutes")
+	at := flag.String("at", "", "run a full sync every day at HH:MM in -timezone")
+	timezone := flag.String("timezone", "", "IANA time zone for -at, e.g. Europe/Berlin (required with -at)")
 	watch := flag.Duration("watch", -1, "service: keep running and check hardstyle.com for new tracks this often, e.g. 15m (default: WATCH_INTERVAL)")
 	lang := flag.String("lang", "", "language of the interface and the messages: de or en (default: UI_LANGUAGE, else de)")
 	noTUI := flag.Bool("no-tui", false, "plain log output instead of the interface (always the case without a terminal)")
 	doCompare := flag.Bool("compare", false, "compare the releases of hardstyle.com and hardtunes.com with each other and exit (no Spotify needed)")
 	doEvaluate := flag.Bool("evaluate", false, "measure the Spotify matching offline on what the cache learned and exit (no Spotify needed)")
 	flag.Parse()
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	httpClient := &http.Client{Timeout: 30 * time.Second}
-
 	envFile := os.Getenv("ENV_FILE")
 	if envFile == "" {
 		envFile = ".env"
@@ -56,6 +55,48 @@ func main() {
 	if err := config.LoadDotEnv(envFile); err != nil {
 		log.Fatalf("read .env: %v", err)
 	}
+	flagSet := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { flagSet[f.Name] = true })
+	if !flagSet["every-minutes"] && !flagSet["every"] {
+		if value := os.Getenv("SYNC_EVERY_MINUTES"); value != "" {
+			parsed, err := strconv.Atoi(value)
+			if err != nil || parsed < 0 {
+				log.Fatalf("invalid SYNC_EVERY_MINUTES %q: use a positive number of minutes", value)
+			}
+			*everyMinutes = parsed
+		}
+	}
+	if !flagSet["at"] {
+		*at = os.Getenv("SYNC_AT")
+	}
+	if !flagSet["timezone"] {
+		*timezone = os.Getenv("SYNC_TIMEZONE")
+	}
+	if *everyMinutes < 0 || (*everyMinutes > 0 && *every > 0) {
+		log.Fatal("use either -every or -every-minutes with a positive value")
+	}
+	if *everyMinutes > 0 {
+		*every = time.Duration(*everyMinutes) * time.Minute
+	}
+	if (*at == "") != (*timezone == "") {
+		log.Fatal("-at and -timezone must be provided together")
+	}
+	var scheduleLocation *time.Location
+	if *at != "" {
+		if _, err := time.Parse("15:04", *at); err != nil {
+			log.Fatalf("invalid -at %q: use HH:MM", *at)
+		}
+		var err error
+		scheduleLocation, err = time.LoadLocation(*timezone)
+		if err != nil {
+			log.Fatalf("invalid -timezone %q: %v", *timezone, err)
+		}
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+
 	// The flag wins over the environment.
 	name := *lang
 	if name == "" {
@@ -117,7 +158,7 @@ func main() {
 	if !*noTUI && isTerminal(os.Stdin) && isTerminal(os.Stdout) {
 		tui.Version = version
 		if err := tui.Run(ctx, tui.Options{
-			Genres: uiGenres(cfg), MaxTracks: cfg.MaxTracks, DryRun: *dryRun, Every: *every, Watch: cfg.WatchInterval,
+			Genres: uiGenres(cfg), MaxTracks: cfg.MaxTracks, DryRun: *dryRun, Every: *every, Watch: cfg.WatchInterval, At: *at, Timezone: scheduleLocation,
 			MaxSearches: cfg.MaxSearches, Apps: sp.Apps, RequestDelay: cfg.RequestDelay, ContinueDelay: cfg.ContinueDelay,
 			Run: func(ctx context.Context, dryRun, quick bool, emit event.Emit) (sync.Result, error) {
 				return sync.Run(ctx, httpClient, sp, cfg, dryRun, quick, emit)
@@ -132,8 +173,8 @@ func main() {
 	}
 	// Without the interface: once and out (cron), or as a service that carries on by itself: with -every it does
 	// a full sync now and then, with -watch (or WATCH_INTERVAL) it also checks for new tracks all the time.
-	service := *every > 0 || *watch > 0
-	sched := sync.Schedule{Every: *every, Watch: cfg.WatchInterval, Continue: cfg.ContinueDelay, DryRun: *dryRun}
+	service := *every > 0 || *watch > 0 || *at != ""
+	sched := sync.Schedule{Every: *every, Watch: cfg.WatchInterval, Continue: cfg.ContinueDelay, DryRun: *dryRun, At: *at, Location: scheduleLocation}
 	if !service {
 		sched.Watch = 0
 	}

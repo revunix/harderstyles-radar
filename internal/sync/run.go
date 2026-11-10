@@ -18,6 +18,7 @@ import (
 	"log"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	gosync "sync"
 	"time"
@@ -501,6 +502,9 @@ type Schedule struct {
 	Continue time.Duration
 	// DryRun runs search a lot but write nothing, so they do not carry on by themselves.
 	DryRun bool
+	// At runs a complete sync every day at HH:MM in Location.
+	At       string
+	Location *time.Location
 }
 
 // next returns when the next run is due, why, and whether it is a quick one. A duration of 0 means: no next run.
@@ -528,6 +532,16 @@ func (s Schedule) Next(res Result, err error, failures int, sinceFull time.Durat
 		return min(d, time.Hour), i18n.T("nach einem Fehler", "after an error"), false
 	case res.Deferred > 0 && !s.DryRun && s.Continue > 0:
 		return s.Continue, fmt.Sprintf(i18n.T("%d warten", "%d waiting"), res.Deferred), false
+	case s.At != "" && s.Location != nil:
+		parts := strings.Split(s.At, ":")
+		hour, _ := strconv.Atoi(parts[0])
+		minute, _ := strconv.Atoi(parts[1])
+		now := time.Now().In(s.Location)
+		next := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, s.Location)
+		if !next.After(now) {
+			next = next.AddDate(0, 0, 1)
+		}
+		return time.Until(next), i18n.T("geplante Uhrzeit", "scheduled time"), false
 	case s.Watch > 0:
 		if s.Every > 0 && sinceFull+s.Watch >= s.Every {
 			return max(s.Every-sinceFull, 0), i18n.T("geplanter Lauf", "scheduled run"), false
