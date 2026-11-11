@@ -3,6 +3,7 @@ package config
 import (
 	"hardstylesync/internal/hardstyle"
 	"hardstylesync/internal/hardtunes"
+	"hardstylesync/internal/hdrr"
 	"os"
 	"path/filepath"
 	"slices"
@@ -185,6 +186,23 @@ func TestHardtunesGenres(t *testing.T) {
 	t.Setenv("HARDTUNES_GENRES", "none")
 	if cfg, err = Load(false); err != nil || len(cfg.HardtunesGenres) != 0 {
 		t.Errorf("none switches hardtunes.com off, got %v, err = %v", cfg.HardtunesGenres, err)
+	}
+}
+
+func TestHdrrPlaylists(t *testing.T) {
+	t.Setenv("SPOTIFY_CLIENT_ID", "x")
+	t.Setenv("SPOTIFY_CLIENT_SECRET", "x")
+	cfg, err := Load(false)
+	if err != nil || !slices.Equal(cfg.HdrrPlaylists, hdrr.Playlists) {
+		t.Errorf("default = all six hdrr.info playlists, got %v, err = %v", cfg.HdrrPlaylists, err)
+	}
+	t.Setenv("HDRR_PLAYLISTS", "Hardstyle, uptempo-release-radar")
+	if cfg, err = Load(false); err != nil || !slices.Equal(cfg.HdrrPlaylists, []string{"hardstyle", "uptempo"}) {
+		t.Errorf("HDRR_PLAYLISTS must win, got %v, err = %v", cfg.HdrrPlaylists, err)
+	}
+	t.Setenv("HDRR_PLAYLISTS", "none")
+	if cfg, err = Load(false); err != nil || len(cfg.HdrrPlaylists) != 0 {
+		t.Errorf("none switches hdrr.info off, got %v, err = %v", cfg.HdrrPlaylists, err)
 	}
 }
 

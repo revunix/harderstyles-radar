@@ -1,8 +1,8 @@
 # harderstyles-radar
 
 A single Go binary that keeps a Spotify playlist in sync with the latest hardstyle releases on
-[hardstyle.com](https://hardstyle.com) and [hardtunes.com](https://www.hardtunes.com). It reads the newest
-releases of the track lists of both sites, enough to fill `MAX_TRACKS` tracks (default 500), finds them on Spotify
+[hardstyle.com](https://hardstyle.com) and [hardtunes.com](https://www.hardtunes.com), filled in from the release
+radar playlists of [hdrr.info](https://www.hdrr.info). It reads the newest releases of the track lists of all sites, enough to fill `MAX_TRACKS` tracks (default 500), finds them on Spotify
 and writes the playlist, newest first or sorted as `PLAYLIST_ORDER` says. A new release pushes the oldest out.
 
 The tool runs as an interactive terminal UI (TUI) or as a plain command for cron and service use. It remembers what
@@ -33,6 +33,10 @@ minutes and touches Spotify only when something new appeared.
   which has releases hardstyle.com lacks. A release on both sites is taken once, from hardstyle.com; an album on
   hardtunes.com is replaced by its tunes. `-compare` shows what is on both sites and what only on one, no Spotify
   needed.
+- **Third source: hdrr.info** — every run also reads the release radar playlists of hdrr.info (`HDRR_PLAYLISTS`),
+  which collect every new release of a genre on Spotify. They fill in what neither shop lists; a release a shop
+  has is taken from the shop. The track page of hdrr.info names the ISRC, so a release found only there costs one
+  Spotify search like any other.
 - **Every genre can keep its place** — `GENRE_MIN` keeps the newest releases of every genre in the window, however
   busy the others are.
 - **Notices when a site changes** — unreadable or empty lists, missing dates or lengths are reported as warnings,
@@ -141,6 +145,7 @@ precedence over the file. `.env` is listed in `.gitignore`.
 | `GENRES` | no | `Hardstyle` | `any` = the general list, whatever the genre; `all` = every genre separately; or comma-separated: `Hardstyle,Hardcore,Uptempo,Frenchcore,Freestyle,Hard Dance,Hard Techno,UK/Happy Hardcore` |
 | `PAGES` | no | enough for `MAX_TRACKS` from one list (`MAX_TRACKS`/20); `2` for `-compare` | The most pages a run may read of one list. A run reads only as far as the releases it needs reach, so this is a safety cap; `-compare` reads this many pages of every list |
 | `HARDTUNES_GENRES` | no | all six: `hardstyle,hardcore,terror,frenchcore,early-rave,hard-techno` | Genre lists of hardtunes.com read by every run and by `-compare`: `https://www.hardtunes.com/<genre>/page/1/`; `none` switches the second source off |
+| `HDRR_PLAYLISTS` | no | all six: `hardstyle,uptempo,hardcore,hard-techno,frenchcore,happy-hardcore` | Release radar playlists of hdrr.info read by every run and by `-compare`: `https://www.hdrr.info/playlists/<playlist>-release-radar`; `none` switches the third source off |
 | `MAX_TRACKS` | no | `500` | The playlist holds at most this many tracks. The newest this many releases are read and looked up, and one more for every release Spotify does not have, so the playlist fills up |
 | `PLAYLIST_ORDER` | no | `newest` | `newest` (release date, newest first), `oldest` (newest at the end), `artist` or `title`. The newest `MAX_TRACKS` are kept whatever the order |
 | `GENRE_MIN` | no | `0` | Every genre keeps at least its newest this many releases, however busy the other genres are (e.g. `10` keeps Terror and Uptempo in a playlist full of Hardstyle); `0` = only the release date counts |
@@ -157,7 +162,7 @@ precedence over the file. `.env` is listed in `.gitignore`.
 | `UI_LANGUAGE` | no | `de` | Language of the UI, the log and the messages: `de` or `en` (also `-lang en`) |
 | `NO_COLOR` | no | | Set to anything (or `TERM=dumb`) and the interface draws as plain text, without color. The layout stays the same |
 | `CONTINUE_DELAY` | no | `10m` | Pause before the next run when releases are still waiting or a run failed |
-| `PLAYLIST_DESCRIPTION` | no | English default text | Playlist description; `{date}`, `{max}`, `{source}` (the genres) and `{sites}` (hardstyle.com, plus hardtunes.com when it is on) are replaced, `off` leaves the description alone |
+| `PLAYLIST_DESCRIPTION` | no | English default text | Playlist description; `{date}`, `{max}`, `{source}` (the genres) and `{sites}` (hardstyle.com, plus hardtunes.com and hdrr.info when they are on) are replaced, `off` leaves the description alone |
 | `DISCORD_WEBHOOK_URL` | no | | Send the summary of a run to this Discord webhook (channel → Edit Channel → Integrations → Webhooks). Empty: nothing is sent |
 | `DATE_TOLERANCE_DAYS` | no | `14` | Allowed difference between the Spotify date and the date on hardstyle.com; a few days are normal (see below) |
 
@@ -169,7 +174,7 @@ go run ./cmd/harderstyles-radar -status       # Spotify apps: blocks, and whethe
 go run ./cmd/harderstyles-radar               # UI, starts a run immediately
 go run ./cmd/harderstyles-radar -no-tui       # text output only, sync once
 go run ./cmd/harderstyles-radar -every 24h    # keep running, once per day
-go run ./cmd/harderstyles-radar -compare      # compare hardstyle.com and hardtunes.com, no Spotify needed
+go run ./cmd/harderstyles-radar -compare      # compare hardstyle.com, hardtunes.com and hdrr.info, no Spotify needed
 ```
 
 | Option | |
@@ -184,7 +189,7 @@ go run ./cmd/harderstyles-radar -compare      # compare hardstyle.com and hardtu
 | `-watch <d>` | Service: check hardstyle.com for new tracks this often, e.g. `15m` (default: `WATCH_INTERVAL`) |
 | `-lang <l>` | Language of the UI and the messages: `de` or `en` |
 | `-no-tui` | Plain log output instead of the interface |
-| `-compare` | Compare the releases of hardstyle.com and hardtunes.com with each other and exit (uses `GENRES`, `HARDTUNES_GENRES`, `PAGES`) |
+| `-compare` | Compare the releases of hardstyle.com, hardtunes.com and hdrr.info with each other and exit (uses `GENRES`, `HARDTUNES_GENRES`, `HDRR_PLAYLISTS`, `PAGES`) |
 | `-evaluate` | Measure the Spotify matching offline on what the cache learned and exit (no Spotify needed, see below) |
 | `update` / `-update` | Check GitHub for a newer version and update the application binary |
 | `check-update` / `-check-update` | Check GitHub if a newer version is available and exit |
@@ -239,7 +244,7 @@ names the releases to correct. One release per line, `#` starts a comment:
 1234999  force  spotify:track:def
 ```
 
-The id is the track id on hardstyle.com (the product number on hardtunes.com). `retry` drops the remembered track
+The id is the track id on hardstyle.com (the product number on hardtunes.com, `hdrr:<slug>` for hdrr.info, e.g. `hdrr:the-power-is-ours`). `retry` drops the remembered track
 once and searches again. `skip` remembers the Spotify track and never picks it again, then searches for another
 one. `force` takes the given track and never searches the release again — this is how an **uncertain** release (two
 Spotify tracks fit almost equally well, see below) is decided. The file is read on every run, so it works the same
@@ -329,13 +334,14 @@ can be judged by numbers instead of by feel. The numbers grow with every run.
 
 ## How the playlist stays up to date
 
-- **Which releases:** The newest `MAX_TRACKS` releases of all lists of both sites (with `GENRE_MIN`, every genre's
+- **Which releases:** The newest `MAX_TRACKS` releases of all lists of all sites (with `GENRE_MIN`, every genre's
   newest come first), and one older release more for every one that Spotify does not have, so the tracks can fill
   `MAX_TRACKS`. The lists are sorted newest first, so the tool merges them by release date and reads only as
   many pages as that needs. hardstyle.com names the date on the release page (read once, then kept in the cache).
   hardtunes.com names fresh releases by day and older ones only by week in its list; the tune page names the day,
-  and once known it is kept. A release on both sites (same artists, title and version in any spelling, or the
-  same ISRC) is taken once, from hardstyle.com.
+  and once known it is kept. hdrr.info names the day of every track in its playlist, which is one page per genre.
+  A release on several sites (same artists, title and version in any spelling, or the same ISRC) is taken once:
+  from hardstyle.com, else from hardtunes.com, else from hdrr.info.
 - **Order:** `PLAYLIST_ORDER`: newest release date first (default; equal dates in the order of the lists), oldest
   first, by artist or by title. The versions of one release stay together. This is checked on every start and
   corrected if necessary. With `newest`, the normal case (new tracks on top, old ones dropped at the end) needs
@@ -343,7 +349,7 @@ can be judged by numbers instead of by feel. The numbers grow with every run.
   longer among the newest releases stay as long as there is room, ranked by their release date; beyond
   `MAX_TRACKS` the oldest drop out.
 - **Date:** For each release the tool reads the release date from its page (hardstyle.com: the release page,
-  hardtunes.com: the tune page) and compares it with the Spotify match — on every path, also when the ISRC found
+  hardtunes.com: the tune page, hdrr.info: the track page) and compares it with the Spotify match — on every path, also when the ISRC found
   the recording. A few days of difference are normal and allowed (`DATE_TOLERANCE_DAYS`, default 14); if title
   and artist match and the difference stays below 45 days, the track is included as well and marked “Date differs
   by N days”. Beyond that it is not taken, whatever named it: this way neither an old version of the same title
@@ -540,6 +546,7 @@ internal/config/          Settings from environment and .env
 internal/i18n/            German/English, date and duration texts
 internal/hardstyle/       Reading hardstyle.com (list, detail page, ISRC)
 internal/hardtunes/       Reading hardtunes.com (genre lists of the second source)
+internal/hdrr/            Reading hdrr.info (release radar playlists of the third source)
 internal/compare/         Comparing the release lists of all sources (-compare)
 internal/eval/            Measuring the Spotify matching offline (-evaluate)
 internal/match/           Comparing title, artist and date
@@ -552,7 +559,7 @@ internal/tui/             UI (bubbletea/lipgloss)
 ```
 
 Packages depend on each other in one direction only: `tui` and `sync` on top, below them `spotify`, `cache`,
-`hardstyle`, `hardtunes`, `compare`, `eval`, `match`, `config`; `i18n` and `event` are available everywhere.
+`hardstyle`, `hardtunes`, `hdrr`, `compare`, `eval`, `match`, `config`; `i18n` and `event` are available everywhere.
 
 ## Tests
 

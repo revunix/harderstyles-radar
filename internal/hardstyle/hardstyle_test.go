@@ -18,15 +18,15 @@ func init() { PageDelay, DetailDelay, RetryDelay = 0, 0, 0 }
 
 func TestParseDetails(t *testing.T) {
 	page := []byte(`<script type="application/ld+json"> { "catalogNumber": " minus288 ", "duration": "PT04M41S", "datePublished": "2026-10-29T00:00:00+01:00", "isrcCode": "nl-g3w-26-00092" } </script>`)
-	d, err := parseDetails(page)
+	d, err := ParseDetails(page)
 	if err != nil || d.Date != "2026-10-29" || d.ISRC != "NLG3W2600092" || d.Catalog != "MINUS288" || d.Duration != 281 {
 		t.Errorf("details = %+v err=%v", d, err)
 	}
-	d, err = parseDetails([]byte(`"datePublished": "2026-01-02T00:00:00"`))
+	d, err = ParseDetails([]byte(`"datePublished": "2026-01-02T00:00:00"`))
 	if err != nil || d.ISRC != "" || d.Catalog != "" || d.Duration != 0 {
 		t.Errorf("a page without an ISRC is fine: %+v %v", d, err)
 	}
-	if _, err := parseDetails([]byte("<html></html>")); err == nil {
+	if _, err := ParseDetails([]byte("<html></html>")); err == nil {
 		t.Error("a page without a date is an error")
 	}
 }

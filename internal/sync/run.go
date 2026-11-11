@@ -11,6 +11,7 @@ import (
 	"hardstylesync/internal/event"
 	"hardstylesync/internal/hardstyle"
 	"hardstylesync/internal/hardtunes"
+	"hardstylesync/internal/hdrr"
 	"hardstylesync/internal/i18n"
 	"hardstylesync/internal/match"
 	"hardstylesync/internal/notify"
@@ -137,7 +138,7 @@ func run(ctx context.Context, hc *http.Client, sp *spotify.Client, cfg config.Co
 		return Result{}, err
 	}
 	if len(releases.tracks) == 0 {
-		return Result{Warnings: releases.warnings}, errors.New(i18n.T("keine Releases auf hardstyle.com oder hardtunes.com gefunden", "no releases found on hardstyle.com or hardtunes.com"))
+		return Result{Warnings: releases.warnings}, errors.New(i18n.T("keine Releases auf hardstyle.com, hardtunes.com oder hdrr.info gefunden", "no releases found on hardstyle.com, hardtunes.com or hdrr.info"))
 	}
 
 	if quick {
@@ -157,10 +158,11 @@ func run(ctx context.Context, hc *http.Client, sp *spotify.Client, cfg config.Co
 			return Result{}, err
 		}
 	}
-	htByPath := releases.hardtunes
+	htByPath, hdrrByPath := releases.hardtunes, releases.hdrr
 
 	hsDetails := hardstyle.NewDetailFetcher(hc, hardstyle.DetailDelay)
 	htDetails := hardtunes.NewDetailFetcher(hc, hardtunes.DetailDelay)
+	hdrrDetails := hdrr.NewDetailFetcher(hc, hdrr.DetailDelay)
 	res, err := Sync(ctx, sp, cfg.PlaylistID, releases.tracks, Options{
 		MaxTracks:      cfg.MaxTracks,
 		MaxSearches:    cfg.MaxSearches,
@@ -173,6 +175,9 @@ func run(ctx context.Context, hc *http.Client, sp *spotify.Client, cfg config.Co
 		FetchDetails: func(ctx context.Context, tr hardstyle.Track) (hardstyle.Details, error) {
 			if t, ok := htByPath[tr.Path]; ok {
 				return htDetails.Fetch(ctx, t)
+			}
+			if t, ok := hdrrByPath[tr.Path]; ok {
+				return hdrrDetails.Fetch(ctx, t)
 			}
 			if releases.detailsRead[tr.Path] {
 				// The window read this page a moment ago; what it said is in the cache.
@@ -195,12 +200,14 @@ func run(ctx context.Context, hc *http.Client, sp *spotify.Client, cfg config.Co
 	return res, nil
 }
 
-// window is what a run reads from the sites: the newest MaxTracks releases, the hardtunes.com releases among
-// them by page address, so their details are read from the right site, the hardstyle.com release pages read
+// window is what a run reads from the sites: the newest MaxTracks releases, the hardtunes.com and hdrr.info
+// releases among them by page address, so their details are read from the right site, the hardstyle.com release
+// pages read
 // for their dates, so they are not read twice, and what looked wrong on the way (warnings).
 type window struct {
 	tracks      []hardstyle.Track
 	hardtunes   map[string]hardtunes.Track
+	hdrr        map[string]hdrr.Track
 	detailsRead map[string]bool
 	warnings    []string
 	// since is the oldest day a Spotify track may have for this window: the oldest release in it less the
@@ -217,7 +224,7 @@ type window struct {
 // MaxTracks. A list that cannot be read is left out of this run with a warning; the run fails only when no list
 // can be read.
 func readWindow(ctx context.Context, hc *http.Client, cfg config.Config, quick bool, c *cache.Cache, emit event.Emit) (window, error) {
-	w := window{hardtunes: map[string]hardtunes.Track{}, detailsRead: map[string]bool{}}
+	w := window{hardtunes: map[string]hardtunes.Track{}, hdrr: map[string]hdrr.Track{}, detailsRead: map[string]bool{}}
 	var stopAt func(hardstyle.Track) bool
 	if quick {
 		stopAt = func(t hardstyle.Track) bool {
@@ -284,7 +291,36 @@ func readWindow(ctx context.Context, hc *http.Client, cfg config.Config, quick b
 		})
 	}
 
-	// The date of a release: hardtunes.com names it in its list, hardstyle.com on the release page, which the
+	// hdrr.info collects what came out on Spotify, every genre in one playlist on one page. Its releases fill in
+	// what the shops do not list; a release the shops have is taken from them.
+	for _, pl := range cfg.HdrrPlaylists {
+		feeds = append(feeds, &feed{
+			name:     "hdrr.info " + hdrr.GenreLabel(pl),
+			genre:    hdrr.GenreLabel(pl),
+			maxPages: 1,
+			stopAt:   stopAt,
+			fetch: func(ctx context.Context, page int) ([]hardstyle.Track, error) {
+				tracks, err := hdrr.FetchPlaylist(ctx, hc, pl)
+				if errors.Is(err, hdrr.ErrNoResults) {
+					return nil, errEndOfList
+				}
+				if err != nil {
+					return nil, err
+				}
+				out := make([]hardstyle.Track, len(tracks))
+				for i, t := range tracks {
+					if e, ok := c.Entry(t.Track); t.Date != "" && (!ok || !e.DateExact) {
+						c.RememberDate(t.Track, t.Date)
+					}
+					out[i] = t.Track
+					w.hdrr[t.Path] = t
+				}
+				return out, nil
+			},
+		})
+	}
+
+	// The date of a release: hardtunes.com and hdrr.info name it in their lists, hardstyle.com on the release page, which the
 	// cache keeps. A page that cannot be read leaves the date unknown; the release then counts as new as the one
 	// before it in its list.
 	details := hardstyle.NewDetailFetcher(hc, hardstyle.DetailDelay)
@@ -295,6 +331,12 @@ func readWindow(ctx context.Context, hc *http.Client, cfg config.Config, quick b
 				undated[t.Path] = true
 			}
 			return ht.Date
+		}
+		if x, ok := w.hdrr[t.Path]; ok {
+			if x.Date == "" {
+				undated[t.Path] = true
+			}
+			return x.Date
 		}
 		if e, ok := c.Entry(t); ok && !e.DetailsDue() {
 			return e.Date
@@ -350,7 +392,7 @@ func readWindow(ctx context.Context, hc *http.Client, cfg config.Config, quick b
 	}
 	emit.Logf(i18n.T("Die neuesten %d Releases (Limit %d) aus %d Listen, %d Seiten gelesen", "The newest %d releases (limit %d) from %d lists, %d pages read"), len(tracks), cfg.MaxTracks, len(feeds), pages)
 	w.tracks = tracks
-	w.since = sinceOf(tracks, w.hardtunes, c)
+	w.since = sinceOf(tracks, w.listDate, c)
 	w.checkHealth(feeds, undated, emit)
 	return w, nil
 }
@@ -358,12 +400,12 @@ func readWindow(ctx context.Context, hc *http.Client, cfg config.Config, quick b
 // sinceOf is the oldest day a Spotify track may have for a release of this window: the oldest release in it,
 // less the grace the dates of the two sides may be apart. Releases without a date of their own are held to it,
 // so a track from years ago cannot slip in when a release page could not be read.
-func sinceOf(tracks []hardstyle.Track, ht map[string]hardtunes.Track, c *cache.Cache) string {
+func sinceOf(tracks []hardstyle.Track, listDate func(string) (string, bool), c *cache.Cache) string {
 	oldest := ""
 	for _, t := range tracks {
 		d := ""
-		if x, ok := ht[t.Path]; ok {
-			d = x.Date
+		if x, ok := listDate(t.Path); ok {
+			d = x
 		} else if e, ok := c.Entry(t); ok {
 			d = e.Date
 		}
@@ -376,6 +418,18 @@ func sinceOf(tracks []hardstyle.Track, ht map[string]hardtunes.Track, c *cache.C
 		return ""
 	}
 	return day.AddDate(0, 0, -match.GraceDays).Format("2006-01-02")
+}
+
+// listDate is the day the list of hardtunes.com or hdrr.info named for the release at path (ok false: the release
+// is not from these lists).
+func (w *window) listDate(path string) (string, bool) {
+	if x, ok := w.hardtunes[path]; ok {
+		return x.Date, true
+	}
+	if x, ok := w.hdrr[path]; ok {
+		return x.Date, true
+	}
+	return "", false
 }
 
 // warn notes something that looked wrong: in the log now, and in the summary of the run.
@@ -413,7 +467,7 @@ func (w *window) checkHealth(feeds []*feed, undated map[string]bool, emit event.
 	}
 	hs, timed := 0, 0
 	for _, t := range w.tracks {
-		if !fromHardtunes(t) {
+		if sourceRank(t) == 0 {
 			hs++
 			if t.Duration > 0 {
 				timed++
@@ -584,9 +638,16 @@ func playlistDescription(cfg config.Config, now time.Time) string {
 	case len(cfg.Genres) > 0:
 		source = strings.Join(cfg.Genres, ", ")
 	}
-	sites := "hardstyle.com"
+	names := []string{"hardstyle.com"}
 	if len(cfg.HardtunesGenres) > 0 {
-		sites = "hardstyle.com and hardtunes.com"
+		names = append(names, "hardtunes.com")
+	}
+	if len(cfg.HdrrPlaylists) > 0 {
+		names = append(names, "hdrr.info")
+	}
+	sites := names[0]
+	if n := len(names); n > 1 {
+		sites = strings.Join(names[:n-1], ", ") + " and " + names[n-1]
 	}
 	text = strings.NewReplacer(
 		"{source}", source,

@@ -128,7 +128,7 @@ func TestSinceIsTheOldestReleaseLessTheGrace(t *testing.T) {
 	b := hardstyle.Track{ID: "b", Path: "/en/tracks/b", Title: "B"}
 	c.SetDetails(a, hardstyle.Details{Date: "2026-10-29"})
 	c.SetDetails(b, hardstyle.Details{Date: "2026-10-02"})
-	if got := sinceOf([]hardstyle.Track{a, b}, nil, c); got != "2026-08-18" {
+	if got := sinceOf([]hardstyle.Track{a, b}, (&window{}).listDate, c); got != "2026-08-18" {
 		t.Errorf("since = %q, want the oldest day (2026-10-02) less %d days", got, 45)
 	}
 }

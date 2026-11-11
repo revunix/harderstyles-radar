@@ -14,6 +14,7 @@ import (
 
 	"hardstylesync/internal/hardstyle"
 	"hardstylesync/internal/hardtunes"
+	"hardstylesync/internal/hdrr"
 	"hardstylesync/internal/i18n"
 	"hardstylesync/internal/spotify"
 )
@@ -25,7 +26,9 @@ type Config struct {
 	Credentials []spotify.Credential
 	Genres      []string
 	// HardtunesGenres are the genre lists of hardtunes.com, the second source (HARDTUNES_GENRES); none = off.
-	HardtunesGenres                            []string
+	HardtunesGenres []string
+	// HdrrPlaylists are the release radar playlists of hdrr.info, the third source (HDRR_PLAYLISTS); none = off.
+	HdrrPlaylists                              []string
 	CacheFile                                  string
 	CorrectionsFile                            string // releases whose Spotify track was refused; empty derives it from the cache file
 	Pages, MaxTracks                           int
@@ -120,6 +123,16 @@ func load(needRefresh, needSpotify bool) (Config, error) {
 			c.HardtunesGenres = append(c.HardtunesGenres, hardtunes.Genres...)
 		case g != "":
 			c.HardtunesGenres = append(c.HardtunesGenres, g)
+		}
+	}
+	for _, g := range strings.Split(envStr("HDRR_PLAYLISTS", strings.Join(hdrr.Playlists, ",")), ",") {
+		switch g = strings.ToLower(strings.TrimSpace(g)); {
+		case g == "none" || g == "off":
+			c.HdrrPlaylists = nil
+		case g == "all" || g == "*":
+			c.HdrrPlaylists = append(c.HdrrPlaylists, hdrr.Playlists...)
+		case g != "":
+			c.HdrrPlaylists = append(c.HdrrPlaylists, strings.TrimSuffix(g, "-release-radar"))
 		}
 	}
 	if c.Pages == 0 {

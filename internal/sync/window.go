@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"hardstylesync/internal/hardstyle"
+	"hardstylesync/internal/hdrr"
 	"hardstylesync/internal/match"
 )
 
@@ -148,8 +149,9 @@ func (m *merge) take(ctx context.Context, feeds []*feed, n int) error {
 			}
 		}
 		if j, ok := m.find(keys); ok {
-			if fromHardtunes(m.out[j]) && !fromHardtunes(t) {
-				m.out[j] = t // the copy from hardstyle.com wins, its page has the catalog number
+			if sourceRank(t) < sourceRank(m.out[j]) {
+				// The copy from hardstyle.com wins, its page has the catalog number; a shop wins over hdrr.info.
+				m.out[j] = t
 			}
 			for _, k := range keys {
 				m.at[k] = j
@@ -199,7 +201,7 @@ func (m *merge) tracks() int {
 // newestReleases takes the newest o.limit releases of all feeds (more with o.tracksOf), newest first, reading no
 // page more than that needs. A release without a date is as new as the one before it in its list. A release that
 // is already in the window (same artists, title and version, or the same ISRC) is not taken twice; the copy from
-// hardstyle.com wins. With o.minPerGenre every genre gets its newest releases first. For equal dates the earlier
+// hardstyle.com wins, then the one from hardtunes.com. With o.minPerGenre every genre gets its newest releases first. For equal dates the earlier
 // feed comes first. A list that cannot be read is left out (its feed keeps the error); only when no list can be
 // read at all the window fails.
 func newestReleases(ctx context.Context, feeds []*feed, o windowOptions) ([]hardstyle.Track, error) {
@@ -254,9 +256,16 @@ func newestReleases(ctx context.Context, feeds []*feed, o windowOptions) ([]hard
 	return out, nil
 }
 
-// fromHardtunes tells a release of hardtunes.com: its page address is absolute, those of hardstyle.com are not.
-func fromHardtunes(t hardstyle.Track) bool {
-	return strings.HasPrefix(t.Path, "http://") || strings.HasPrefix(t.Path, "https://")
+// sourceRank tells which copy of a release on several sites is taken (the lowest): hardstyle.com (0), whose page
+// addresses are relative, then hardtunes.com (1), then hdrr.info (2), whose IDs carry hdrr.IDPrefix.
+func sourceRank(t hardstyle.Track) int {
+	switch {
+	case !strings.HasPrefix(t.Path, "http://") && !strings.HasPrefix(t.Path, "https://"):
+		return 0
+	case strings.HasPrefix(t.ID, hdrr.IDPrefix):
+		return 2
+	}
+	return 1
 }
 
 // releaseKey names a release the same on both sites: the artists in any order and with any joiner ("&",

@@ -1,9 +1,10 @@
-// Package compare reads the release lists of every configured source (hardstyle.com, hardtunes.com) and
+// Package compare reads the release lists of every configured source (hardstyle.com, hardtunes.com, hdrr.info) and
 // compares them with each other: what is on both sites, what only on one.
 package compare
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -12,6 +13,7 @@ import (
 	"hardstylesync/internal/config"
 	"hardstylesync/internal/hardstyle"
 	"hardstylesync/internal/hardtunes"
+	"hardstylesync/internal/hdrr"
 	"hardstylesync/internal/i18n"
 	"hardstylesync/internal/match"
 )
@@ -56,15 +58,32 @@ func Run(ctx context.Context, hc *http.Client, cfg config.Config, logf func(stri
 			}
 			return out, err
 		}},
+		{"hdrr.info", cfg.HdrrPlaylists, func(ctx context.Context, client *http.Client, playlist string, _ int) ([]hardstyle.Track, error) {
+			tracks, err := hdrr.FetchPlaylist(ctx, client, playlist)
+			if errors.Is(err, hdrr.ErrNoResults) {
+				err = nil
+			}
+			out := make([]hardstyle.Track, len(tracks))
+			for i, tr := range tracks {
+				out[i] = tr.Track
+			}
+			return out, err
+		}},
 	}
 
 	var rep Report
 	for _, s := range sources {
+		if len(s.genres) == 0 {
+			continue // switched off
+		}
 		src := Source{Name: s.name, Genres: map[string][]hardstyle.Track{}, keys: map[string]hardstyle.Track{}}
 		for _, genre := range s.genres {
 			label := hardstyle.GenreLabel(genre)
-			if s.name == "hardtunes.com" {
+			switch s.name {
+			case "hardtunes.com":
 				label = hardtunes.GenreLabel(genre)
+			case "hdrr.info":
+				label = hdrr.GenreLabel(genre)
 			}
 			logf(i18n.T("%s %s: %d Seiten lesen", "%s %s: reading %d pages"), s.name, label, cfg.Pages)
 			tracks, err := s.fetch(ctx, hc, genre, cfg.Pages)

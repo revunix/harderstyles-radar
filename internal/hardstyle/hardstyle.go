@@ -374,12 +374,12 @@ func (f *DetailFetcher) Fetch(ctx context.Context, t Track) (Details, error) {
 	if err != nil {
 		return Details{}, err
 	}
-	return parseDetails(body)
+	return ParseDetails(body)
 }
 
-// parseDetails reads the date, the ISRC, the catalog number and the length from the data of a track page
+// ParseDetails reads the date, the ISRC, the catalog number and the length from the data of a track page
 // (JSON-LD).
-func parseDetails(page []byte) (Details, error) {
+func ParseDetails(page []byte) (Details, error) {
 	m := datePublished.FindSubmatch(page)
 	if m == nil {
 		return Details{}, errors.New(i18n.T("kein Veröffentlichungsdatum auf der Seite", "no release date on the page"))

@@ -24,6 +24,7 @@ import (
 	"hardstylesync/internal/eval"
 	"hardstylesync/internal/event"
 	"hardstylesync/internal/hardtunes"
+	"hardstylesync/internal/hdrr"
 	"hardstylesync/internal/i18n"
 	"hardstylesync/internal/spotify"
 	"hardstylesync/internal/sync"
@@ -32,7 +33,7 @@ import (
 )
 
 // version is set through -ldflags.
-var version = "1.2.6"
+var version = "1.2.7"
 
 func main() {
 	if len(os.Args) > 1 {
@@ -95,7 +96,7 @@ func main() {
 	watch := flag.Duration("watch", -1, "service: keep running and check hardstyle.com for new tracks this often, e.g. 15m (default: WATCH_INTERVAL)")
 	lang := flag.String("lang", "", "language of the interface and the messages: de or en (default: UI_LANGUAGE, else de)")
 	noTUI := flag.Bool("no-tui", false, "plain log output instead of the interface (always the case without a terminal)")
-	doCompare := flag.Bool("compare", false, "compare the releases of hardstyle.com and hardtunes.com with each other and exit (no Spotify needed)")
+	doCompare := flag.Bool("compare", false, "compare the releases of hardstyle.com, hardtunes.com and hdrr.info with each other and exit (no Spotify needed)")
 	doEvaluate := flag.Bool("evaluate", false, "measure the Spotify matching offline on what the cache learned and exit (no Spotify needed)")
 	doUpdate := flag.Bool("update", false, "check for updates and update harderstyles-radar")
 	doCheckUpdate := flag.Bool("check-update", false, "check if a new version is available and exit")
@@ -318,11 +319,19 @@ func logEmit(ev event.Event) {
 	}
 }
 
-// uiGenres are the genres the interface can filter by: those of hardstyle.com, then those only hardtunes.com has.
+// uiGenres are the genres the interface can filter by: those of hardstyle.com, then those only hardtunes.com or
+// hdrr.info have.
 func uiGenres(cfg config.Config) []string {
 	out := slices.Clone(cfg.Genres)
+	var more []string
 	for _, g := range cfg.HardtunesGenres {
-		if l := hardtunes.GenreLabel(g); !slices.ContainsFunc(out, func(o string) bool { return strings.EqualFold(o, l) }) {
+		more = append(more, hardtunes.GenreLabel(g))
+	}
+	for _, p := range cfg.HdrrPlaylists {
+		more = append(more, hdrr.GenreLabel(p))
+	}
+	for _, l := range more {
+		if !slices.ContainsFunc(out, func(o string) bool { return strings.EqualFold(o, l) }) {
 			out = append(out, l)
 		}
 	}
